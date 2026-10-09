@@ -1,0 +1,6 @@
+{
+  "name": "DiwaliBigdeal Telegram Bot Backend",
+  "description": "Production-ready Telegram-first campaign bot backend for DiwaliBigdeal (₹199 Entry) with persistent state machine, payment webhook verification, and atomic unique ticket generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
