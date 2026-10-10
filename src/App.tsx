@@ -496,10 +496,10 @@ export default function App() {
             <span className="font-semibold text-white">Campaign: DiwaliBigdeal</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums text-amber-400">
-              Entry Fee: 100 Telegram Stars ⭐️ (XTR)
+              Entry Fee: ₹199
             </span>
             <span aria-hidden="true">·</span>
-            <span>Prizes: Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV, Cash Prizes</span>
+            <span>Prizes: Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV, Multiple Cash Prizes</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">Draw: 8 November 2026 at 11:59 PM IST</span>
           </div>
@@ -656,32 +656,47 @@ export default function App() {
                   <button
                     disabled={sendingUpdate}
                     onClick={() =>
-                      dispatchTelegramTextUpdate(simUserId, '🎟️ Join Entry (100 Telegram Stars ⭐️)')
+                      dispatchTelegramTextUpdate(simUserId, '🎟️ अभी जुड़ें | Join Now (₹199)')
                     }
                     className="col-span-2 py-1.5 px-3 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-white rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
-                    🎟️ Join Entry (100 Telegram Stars ⭐️)
+                    🎟️ अभी जुड़ें | Join Now (₹199)
                   </button>
                   <button
                     disabled={sendingUpdate}
-                    onClick={() => dispatchTelegramTextUpdate(simUserId, '🎫 My Ticket')}
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '🎁 इनाम देखें | View Prizes')
+                    }
                     className="py-1.5 px-2 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
-                    🎫 My Ticket
+                    🎁 इनाम देखें | View Prizes
                   </button>
                   <button
                     disabled={sendingUpdate}
-                    onClick={() => dispatchTelegramTextUpdate(simUserId, '🏆 Prize Details')}
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '🎫 मेरा टिकट | My Ticket')
+                    }
                     className="py-1.5 px-2 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
-                    🏆 Prize Details
+                    🎫 मेरा टिकट | My Ticket
                   </button>
                   <button
                     disabled={sendingUpdate}
-                    onClick={() => dispatchTelegramTextUpdate(simUserId, '🆘 Support')}
-                    className="col-span-2 py-1.5 px-3 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '📜 नियम और शर्तें | Terms & Conditions')
+                    }
+                    className="py-1.5 px-2 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
-                    🆘 Support
+                    📜 नियम और शर्तें | Terms
+                  </button>
+                  <button
+                    disabled={sendingUpdate}
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '📞 सहायता | Support')
+                    }
+                    className="py-1.5 px-2 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
+                  >
+                    📞 सहायता | Support
                   </button>
                 </div>
               </div>

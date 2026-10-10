@@ -420,12 +420,15 @@ const logger = {
 // ============================================================================
 const MAIN_MENU_INLINE_KEYBOARD = {
   inline_keyboard: [
-    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
+    [{ text: '🎟️ अभी जुड़ें | Join Now (₹199)', callback_data: 'menu_join_199' }],
     [
-      { text: '🎫 My Ticket', callback_data: 'menu_my_ticket' },
-      { text: '🏆 Prize Details', callback_data: 'menu_prize_details' },
+      { text: '🎁 इनाम देखें | View Prizes', callback_data: 'menu_prize_details' },
+      { text: '🎫 मेरा टिकट | My Ticket', callback_data: 'menu_my_ticket' },
     ],
-    [{ text: '🆘 Support', callback_data: 'menu_support' }],
+    [
+      { text: '📜 नियम और शर्तें | Terms & Conditions', callback_data: 'menu_terms' },
+      { text: '📞 सहायता | Support', callback_data: 'menu_support' },
+    ],
   ],
 };
 
@@ -610,12 +613,12 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         commands: [
-          { command: 'start', description: 'Start DiwaliBigdeal & view main menu' },
-          { command: 'enter', description: 'Join DiwaliBigdeal (100 Telegram Stars ⭐️)' },
-          { command: 'ticket', description: 'View your confirmed DB2026 ticket' },
-          { command: 'prizes', description: 'View Mahindra Thar ROXX & prize details' },
-          { command: 'terms', description: 'View campaign rules & terms' },
-          { command: 'support', description: 'Get customer support' },
+          { command: 'start', description: 'DiwaliBigdeal शुरू करें | Main Menu' },
+          { command: 'enter', description: 'अभी जुड़ें | Join Entry (₹199)' },
+          { command: 'prizes', description: 'इनाम देखें | View Prizes' },
+          { command: 'ticket', description: 'मेरा टिकट देखें | View My Ticket' },
+          { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
+          { command: 'support', description: 'सहायता | Customer Support' },
         ],
       }),
     }).catch(() => {});
@@ -984,19 +987,22 @@ async function processVerifiedPaymentWebhook({
 
   if (!issuance.alreadyIssued) {
     const successMessage = [
-      '🎉 PAYMENT SUCCESSFUL!',
+      '🎉 बधाई हो! आपका Payment सफल रहा!',
+      '✅ आपकी DiwaliBigdeal Entry सफलतापूर्वक Confirm हो गई है।',
       '',
-      'Your DiwaliBigdeal entry has been confirmed.',
+      `🎫 Ticket Number: ${issuance.ticketNumber}`,
+      '🎟️ Entry Fee: ₹199',
+      '✅ Status: CONFIRMED',
       '',
-      `🎫 Ticket No: ${issuance.ticketNumber}`,
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
       '',
-      '💰 Amount Paid: 100 Telegram Stars ⭐️',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
       '',
-      '🏆 Good Luck!',
-      '',
-      '📅 Prize Announcement:',
-      '8 November 2026',
-      '11:59 PM IST',
+      '🙏 शुभकामनाएँ! कृपया अपना Ticket Number सुरक्षित रखें।',
     ].join('\n');
 
     await sendTelegramMessage(
@@ -1020,7 +1026,7 @@ async function processVerifiedPaymentWebhook({
 }
 
 // ============================================================================
-// 6. CONVERSATION STATE MACHINE & BOT FLOW (100 Telegram Stars ⭐️)
+// 6. CONVERSATION STATE MACHINE & BOT FLOW
 // ============================================================================
 function validateIndianMobileNumber(input) {
   const cleaned = String(input || '').replace(/[\s\-()]/g, '');
@@ -1047,130 +1053,165 @@ function normalizeBotCommand(rawText) {
 const BOT_MESSAGES = {
   mainMenuGreeting: () =>
     [
-      '🪔 Welcome to DiwaliBigdeal!',
+      '🪔 स्वागत है DiwaliBigdeal में!',
       '',
-      'Entry Fee: 100 Telegram Stars ⭐️',
-      'Win Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV & Multiple Cash Prizes!',
+      '🎉 इस दिवाली DiwaliBigdeal से जुड़ें और शानदार इनाम जीतने का मौका पाएँ!',
       '',
-      'Please choose an option below:',
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
+      '',
+      '🎟️ Entry Fee: ₹199',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
+      '',
+      '👇 आगे बढ़ने के लिए नीचे दिए गए विकल्प चुनें:',
     ].join('\n'),
 
   joinIntro: () =>
     [
-      '🎟️ DIWALI BIGDEAL',
+      '🎟️ DIWALI BIGDEAL — CAMPAIGN ENTRY',
       '',
-      'Entry Fee: 100 Telegram Stars ⭐️',
+      '🎉 इस दिवाली DiwaliBigdeal से जुड़ें और शानदार इनाम जीतने का मौका पाएँ!',
       '',
-      'Join now for your chance to win exciting prizes.',
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
+      '',
+      '🎟️ Entry Fee: ₹199',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
+      '',
+      '👇 अपनी Entry दर्ज करने के लिए नीचे क्लिक करें:',
     ].join('\n'),
 
-  askFullName: () => '👤 Please enter your Full Name:',
+  askFullName: () => '👤 कृपया अपना पूरा नाम (Full Name) दर्ज करें:',
 
   nameReceivedAskMobile: () =>
-    ['✅ Name received.', '', '📱 Please enter your Mobile Number:'].join('\n'),
+    [
+      '✅ आपका नाम दर्ज कर लिया गया है।',
+      '',
+      '📱 कृपया अपना 10 अंकों का Mobile Number दर्ज करें:',
+    ].join('\n'),
 
   invalidMobilePrompt: () =>
     [
-      '⚠️ Invalid Mobile Number.',
+      '⚠️ यह Mobile Number मान्य नहीं है।',
       '',
-      '📱 Please enter a valid 10-digit Mobile Number:',
+      '📱 कृपया अपना सही 10 अंकों का Indian Mobile Number दर्ज करें:',
     ].join('\n'),
 
   mobileReceivedAskAddress: () =>
-    ['✅ Mobile Number received.', '', '🏠 Please enter your Complete Address:'].join('\n'),
+    [
+      '✅ आपका Mobile Number दर्ज कर लिया गया है।',
+      '',
+      '🏠 कृपया अपना पूरा पता (Complete Address) दर्ज करें:',
+    ].join('\n'),
 
   confirmDetails: (name, phone, address) =>
     [
-      '📋 PLEASE CONFIRM YOUR DETAILS',
+      '📋 कृपया अपनी जानकारी की पुष्टि करें (Confirm Details)',
       '',
-      `👤 Name: ${name}`,
-      `📱 Mobile: ${phone}`,
-      `🏠 Address: ${address}`,
+      `👤 नाम (Name): ${name}`,
+      `📱 मोबाइल (Mobile): ${phone}`,
+      `🏠 पता (Address): ${address}`,
       '',
-      '🎟️ Entry Fee: 100 Telegram Stars ⭐️',
+      '🎟️ Entry Fee: ₹199',
       '',
-      'Are these details correct?',
+      'क्या आपकी यह जानकारी बिल्कुल सही है?',
     ].join('\n'),
 
   paymentPrompt: () =>
     [
-      '💳 PAYMENT',
+      '💳 अब Payment करें',
       '',
-      'Amount: 100 Telegram Stars ⭐️',
+      '🎟️ Entry Fee: ₹199',
       '',
-      'Please complete your payment to confirm your DiwaliBigdeal entry.',
+      'अपनी DiwaliBigdeal Entry पक्की (Confirm) करने के लिए कृपया नीचे दिए गए बटन से Payment पूरा करें।',
+      '✅ Payment सफल होते ही आपका Unique Ticket Number तुरंत जारी कर दिया जाएगा।',
     ].join('\n'),
 
   myTicketConfirmed: (ticketNumber, name, phone) =>
     [
-      '🎫 MY TICKET',
+      '🎫 मेरा टिकट | MY CONFIRMED TICKET',
       '',
-      `Ticket No: ${ticketNumber}`,
+      `🎟️ Ticket No: ${ticketNumber}`,
       '',
-      `👤 Name: ${name}`,
-      `📱 Mobile: ${phone}`,
+      `👤 नाम (Name): ${name}`,
+      `📱 मोबाइल (Mobile): ${phone}`,
       '',
-      '💰 Entry: 100 Telegram Stars ⭐️',
-      '✅ Status: CONFIRMED',
+      '🎟️ Entry Fee: ₹199',
+      '✅ Status: CONFIRMED (पक्का)',
       '',
-      '📅 Prize Announcement:',
-      '8 November 2026',
-      '11:59 PM IST',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
     ].join('\n'),
 
-  myTicketNotFound: () => '❌ No confirmed ticket found.',
+  myTicketNotFound: () =>
+    [
+      '❌ अभी तक आपका कोई Confirmed Ticket नहीं मिला है।',
+      '',
+      '🎉 इस दिवाली DiwaliBigdeal से जुड़ें और शानदार इनाम जीतने का मौका पाएँ!',
+      '🎟️ Entry Fee: ₹199',
+      '',
+      '👇 अपनी Entry पक्की करने के लिए नीचे बटन दबाएँ:',
+    ].join('\n'),
 
   prizeDetails: () =>
     [
-      '🏆 DIWALI BIGDEAL',
+      '🎁 DIWALI BIGDEAL — इनामों की जानकारी (Prize Details)',
       '',
-      '🎟️ Entry Fee: 100 Telegram Stars ⭐️',
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
       '',
-      '🚙 Mahindra Thar ROXX',
-      '📺 Smart LED TV',
-      '🧊 Double-Door Refrigerator',
-      '💰 Multiple Cash Prizes',
+      '🎉 इस दिवाली DiwaliBigdeal से जुड़ें और शानदार इनाम जीतने का मौका पाएँ!',
       '',
-      '📅 Prize Announcement:',
-      '8 November 2026',
-      '11:59 PM IST',
+      '🎟️ Entry Fee: ₹199',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
     ].join('\n'),
 
   termsDetails: () =>
     [
-      '📜 DIWALI BIGDEAL — TERMS & CONDITIONS',
+      '📜 DIWALI BIGDEAL — नियम और शर्तें (Terms & Conditions)',
       '',
-      '1. Age Eligibility:',
-      'Participation is strictly limited to individuals aged 18 years or older on the date of entry. Anyone under 18 is not eligible.',
+      '1. आयु सीमा (Age Eligibility):',
+      'इस Campaign में भाग लेने के लिए आपकी उम्र कम से कम 18 वर्ष या उससे अधिक होनी चाहिए। 18 वर्ष से कम आयु के व्यक्ति पात्र (Eligible) नहीं हैं।',
       '',
-      '2. Accurate Information:',
-      'Participants must provide their correct full legal name, valid 10-digit Indian mobile number, and complete residential address. Please carefully check all details before submitting.',
+      '2. सही जानकारी (Accurate Information):',
+      'प्रतिभागियों को अपना सही कानूनी नाम (Full Legal Name), चालू 10 अंकों का Indian Mobile Number और पूरा आवासीय पता (Complete Residential Address) देना अनिवार्य है। कृपया Submit करने से पहले अपनी सभी जानकारी ध्यान से जाँच लें।',
       '',
-      '3. Identity Verification:',
-      "If selected as a potential winner, the participant must provide a valid Government-issued ID for identity and age verification. The name on the ID must match the participant's registered full legal name. Additional verification may be required before the prize is awarded.",
+      '3. पहचान सत्यापन (Identity Verification):',
+      'यदि आप विजेता (Winner) के रूप में चुने जाते हैं, तो पहचान और उम्र की पुष्टि के लिए मान्य सरकारी पहचान पत्र (Valid Government-issued ID) दिखाना आवश्यक होगा। आपकी ID पर दिया गया नाम आपके द्वारा दर्ज किए गए पूरे नाम से मेल खाना चाहिए। इनाम देने से पहले अतिरिक्त Verification किया जा सकता है।',
       '',
-      '4. Incorrect Information:',
-      'If the registered name, address, age, or other details are incorrect, incomplete, misleading, or cannot be verified, the participant may be disqualified in accordance with the campaign rules.',
+      '4. गलत या अधूरी जानकारी (Incorrect Information):',
+      'यदि दर्ज किया गया नाम, पता, आयु या अन्य विवरण गलत, अधूरा या भ्रामक पाया जाता है या उसकी पुष्टि नहीं हो पाती है, तो Campaign नियमों के अनुसार आपकी Entry रद्द (Disqualify) की जा सकती है।',
       '',
-      '5. Prize Draw:',
-      'The official winner announcement is scheduled for 8 November 2026 at 11:59 PM IST.',
+      '5. विजेता की घोषणा (Winner Announcement):',
+      'आधिकारिक Winner Announcement 8 November 2026 को रात 11:59 बजे (IST) किया जाएगा।',
       '',
-      '6. Ticket Safety:',
-      'Participants should keep their confirmed ticket number safe for prize-claim verification. A ticket alone does not guarantee a prize.',
+      '6. टिकट सुरक्षा (Ticket Safety):',
+      'सभी प्रतिभागी इनाम Claim और Verification के लिए अपना Confirmed Ticket Number (DB2026-XXXXXX) सुरक्षित रखें। केवल Ticket होना निश्चित इनाम की गारंटी नहीं है।',
       '',
-      '7. Verification and Prize Claim:',
-      'Potential winners must complete the required verification within the communicated deadline and follow the prize-claim instructions.',
+      '7. सत्यापन और इनाम प्राप्ति (Verification & Prize Claim):',
+      'चयनित विजेताओं को निर्धारित समय-सीमा के भीतर आवश्यक Verification पूरा करना होगा और दिए गए Prize-Claim निर्देशों का पालन करना होगा।',
       '',
-      '8. Privacy:',
-      'Government ID documents and personal information must be collected and handled securely, only when necessary for verification, and in accordance with applicable privacy laws. Do not request customers to post their Government ID publicly in the Telegram chat.',
+      '8. गोपनीयता और सुरक्षा (Privacy):',
+      'आपकी व्यक्तिगत जानकारी और Government ID दस्तावेज़ केवल आवश्यक Verification के लिए सुरक्षित रूप से लिए जाएँगे। कृपया अपनी कोई भी Government ID सार्वजनिक रूप से Telegram Chat में पोस्ट न करें।',
       '',
-      '9. Campaign Rules:',
-      'Participation and prize distribution are subject to applicable laws and the official campaign rules.',
+      '9. अभियान के नियम (Campaign Rules):',
+      'इस Campaign में भागीदारी और इनाम वितरण लागू कानूनों तथा आधिकारिक Campaign Rules के अधीन है।',
     ].join('\n'),
 
   supportMessage: () =>
     [
-      '🆘 SUPPORT',
+      '📞 सहायता केंद्र | CUSTOMER SUPPORT',
+      '',
+      'यदि आपको अपनी Entry, Payment या Ticket से जुड़ी कोई भी सहायता चाहिए, तो कृपया हमें Email करें:',
       '',
       '📧 Support Email: diwalideal2026@gmail.com',
     ].join('\n'),
@@ -1187,11 +1228,11 @@ async function sendConfirmationScreen(customer) {
     inline_keyboard: [
       [
         {
-          text: '✅ Confirm & Pay 100 Telegram Stars ⭐️',
+          text: '✅ पुष्टि करें और ₹199 Payment करें | Confirm & Pay',
           callback_data: 'action_confirm_pay_199',
         },
       ],
-      [{ text: '✏️ Edit Details', callback_data: 'action_edit_details' }],
+      [{ text: '✏️ जानकारी बदलें | Edit Details', callback_data: 'action_edit_details' }],
     ],
   });
 }
@@ -1206,9 +1247,9 @@ async function sendPaymentScreen(customer) {
     inline_keyboard: [
       [
         isNativeTelegramStarsLink
-          ? { text: '💰 Pay 100 Telegram Stars ⭐️', url: paymentOrder.payment_url }
+          ? { text: '💳 अभी Payment करें | Pay Now (₹199)', url: paymentOrder.payment_url }
           : {
-              text: '💰 Pay 100 Telegram Stars ⭐️',
+              text: '💳 अभी Payment करें | Pay Now (₹199)',
               callback_data: `pay_link_${paymentOrder.payment_id}`,
             },
       ],
@@ -1222,7 +1263,7 @@ async function handleJoinEntryTrigger(customer) {
     return;
   }
   await sendTelegramMessage(customer.telegram_chat_id, BOT_MESSAGES.joinIntro(), {
-    inline_keyboard: [[{ text: '🚀 Continue', callback_data: 'action_continue_join' }]],
+    inline_keyboard: [[{ text: '🚀 आगे बढ़ें | Continue', callback_data: 'action_continue_join' }]],
   });
 }
 
@@ -1240,7 +1281,7 @@ async function handleMyTicketTrigger(customer) {
   } else {
     await sendTelegramMessage(customer.telegram_chat_id, BOT_MESSAGES.myTicketNotFound(), {
       inline_keyboard: [
-        [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
+        [{ text: '🎟️ अभी जुड़ें | Join Now (₹199)', callback_data: 'menu_join_199' }],
       ],
     });
   }
@@ -1355,19 +1396,19 @@ async function handleTelegramUpdate(update) {
     const data = String(cb.data || '').trim();
 
     const buttonLabelMap = {
-      menu_join_199: '🎟️ Join Entry (100 Telegram Stars ⭐️)',
-      action_continue_join: '🚀 Continue',
-      action_confirm_pay_199: '✅ Confirm & Pay 100 Telegram Stars ⭐️',
-      action_edit_details: '✏️ Edit Details',
-      menu_my_ticket: '🎫 My Ticket',
-      menu_prize_details: '🏆 Prize Details',
-      menu_terms: '📜 Terms & Conditions',
-      menu_support: '🆘 Support',
+      menu_join_199: '🎟️ अभी जुड़ें | Join Now (₹199)',
+      action_continue_join: '🚀 आगे बढ़ें | Continue',
+      action_confirm_pay_199: '✅ पुष्टि करें और ₹199 Payment करें | Confirm & Pay',
+      action_edit_details: '✏️ जानकारी बदलें | Edit Details',
+      menu_my_ticket: '🎫 मेरा टिकट | My Ticket',
+      menu_prize_details: '🎁 इनाम देखें | View Prizes',
+      menu_terms: '📜 नियम और शर्तें | Terms & Conditions',
+      menu_support: '📞 सहायता | Support',
     };
 
     const tapDisplay =
       buttonLabelMap[data] ||
-      (data.startsWith('pay_link_') ? '💰 Pay 100 Telegram Stars ⭐️' : data);
+      (data.startsWith('pay_link_') ? '💳 अभी Payment करें | Pay Now (₹199)' : data);
 
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),
@@ -1474,6 +1515,8 @@ async function handleTelegramUpdate(update) {
     if (
       command === '/enter' ||
       command === '/join' ||
+      text === '🎟️ अभी जुड़ें | Join Now' ||
+      text === '🎟️ अभी जुड़ें | Join Now (₹199)' ||
       text === '🎟️ Join Entry (100 Telegram Stars ⭐️)' ||
       text === '🎟️ Join ₹199 Entry'
     ) {
@@ -1482,25 +1525,44 @@ async function handleTelegramUpdate(update) {
     }
 
     // Command: /ticket or My Ticket button text
-    if (command === '/ticket' || command === '/myticket' || text === '🎫 My Ticket') {
+    if (
+      command === '/ticket' ||
+      command === '/myticket' ||
+      text === '🎫 मेरा टिकट | My Ticket' ||
+      text === '🎫 My Ticket'
+    ) {
       await handleMyTicketTrigger(customer);
       return customer;
     }
 
     // Command: /prizes or Prize Details button text
-    if (command === '/prizes' || command === '/prize' || text === '🏆 Prize Details') {
+    if (
+      command === '/prizes' ||
+      command === '/prize' ||
+      text === '🎁 इनाम देखें | View Prizes' ||
+      text === '🏆 Prize Details'
+    ) {
       await handlePrizeDetailsTrigger(customer);
       return customer;
     }
 
     // Command: /terms or Terms button text
-    if (command === '/terms' || command === '/rules' || text === '📜 Terms & Conditions') {
+    if (
+      command === '/terms' ||
+      command === '/rules' ||
+      text === '📜 नियम और शर्तें | Terms & Conditions' ||
+      text === '📜 Terms & Conditions'
+    ) {
       await handleTermsTrigger(customer);
       return customer;
     }
 
     // Command: /support or Support button text
-    if (command === '/support' || text === '🆘 Support') {
+    if (
+      command === '/support' ||
+      text === '📞 सहायता | Support' ||
+      text === '🆘 Support'
+    ) {
       await handleSupportTrigger(customer);
       return customer;
     }
@@ -1535,7 +1597,10 @@ async function handleTelegramUpdate(update) {
 
       case ConversationState.WAITING_FOR_ADDRESS: {
         if (text.length < 5) {
-          await sendTelegramMessage(chatId, '🏠 Please enter your Complete Address:');
+          await sendTelegramMessage(
+            chatId,
+            '🏠 कृपया अपना पूरा पता (Complete Address) दर्ज करें:'
+          );
           return customer;
         }
         customer = db.updateCustomer(userId, {

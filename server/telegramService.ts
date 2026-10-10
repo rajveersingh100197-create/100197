@@ -15,20 +15,23 @@ import {
 
 export const MAIN_MENU_INLINE_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
-    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
+    [{ text: '🎟️ अभी जुड़ें | Join Now (₹199)', callback_data: 'menu_join_199' }],
     [
-      { text: '🎫 My Ticket', callback_data: 'menu_my_ticket' },
-      { text: '🏆 Prize Details', callback_data: 'menu_prize_details' },
+      { text: '🎁 इनाम देखें | View Prizes', callback_data: 'menu_prize_details' },
+      { text: '🎫 मेरा टिकट | My Ticket', callback_data: 'menu_my_ticket' },
     ],
-    [{ text: '🆘 Support', callback_data: 'menu_support' }],
+    [
+      { text: '📜 नियम और शर्तें | Terms & Conditions', callback_data: 'menu_terms' },
+      { text: '📞 सहायता | Support', callback_data: 'menu_support' },
+    ],
   ],
 };
 
 export const MAIN_MENU_REPLY_KEYBOARD: ReplyKeyboardMarkup = {
   keyboard: [
-    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)' }],
-    [{ text: '🎫 My Ticket' }, { text: '🏆 Prize Details' }],
-    [{ text: '🆘 Support' }],
+    [{ text: '🎟️ अभी जुड़ें | Join Now' }],
+    [{ text: '🎁 इनाम देखें | View Prizes' }, { text: '🎫 मेरा टिकट | My Ticket' }],
+    [{ text: '📜 नियम और शर्तें | Terms & Conditions' }, { text: '📞 सहायता | Support' }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -204,12 +207,12 @@ export async function ensureTelegramWebhookRegistered(forceSync = false) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         commands: [
-          { command: 'start', description: 'Start DiwaliBigdeal & view main menu' },
-          { command: 'enter', description: 'Join DiwaliBigdeal (100 Telegram Stars ⭐️)' },
-          { command: 'ticket', description: 'View your confirmed DB2026 ticket' },
-          { command: 'prizes', description: 'View Mahindra Thar ROXX & prize details' },
-          { command: 'terms', description: 'View campaign rules & terms' },
-          { command: 'support', description: 'Get customer support' },
+          { command: 'start', description: 'DiwaliBigdeal शुरू करें | Main Menu' },
+          { command: 'enter', description: 'अभी जुड़ें | Join Entry (₹199)' },
+          { command: 'prizes', description: 'इनाम देखें | View Prizes' },
+          { command: 'ticket', description: 'मेरा टिकट देखें | View My Ticket' },
+          { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
+          { command: 'support', description: 'सहायता | Customer Support' },
         ],
       }),
     }).catch(() => {});

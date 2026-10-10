@@ -181,19 +181,22 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
   // Only send the Telegram success confirmation message on first verified payment processing
   if (!issuance.alreadyIssued) {
     const successMessage = [
-      '🎉 PAYMENT SUCCESSFUL!',
+      '🎉 बधाई हो! आपका Payment सफल रहा!',
+      '✅ आपकी DiwaliBigdeal Entry सफलतापूर्वक Confirm हो गई है।',
       '',
-      'Your DiwaliBigdeal entry has been confirmed.',
+      `🎫 Ticket Number: ${issuance.ticketNumber}`,
+      '🎟️ Entry Fee: ₹199',
+      '✅ Status: CONFIRMED',
       '',
-      `🎫 Ticket No: ${issuance.ticketNumber}`,
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
       '',
-      '💰 Amount Paid: 100 Telegram Stars ⭐️',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
       '',
-      '🏆 Good Luck!',
-      '',
-      '📅 Prize Announcement:',
-      '8 November 2026',
-      '11:59 PM IST',
+      '🙏 शुभकामनाएँ! कृपया अपना Ticket Number सुरक्षित रखें।',
     ].join('\n');
 
     await sendTelegramMessage(
