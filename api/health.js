@@ -20,8 +20,9 @@ module.exports = function handler(_req, res) {
     service: 'DiwaliBigdeal Telegram Bot Backend',
     runtime: process.env.VERCEL ? 'vercel-serverless' : 'node',
     payment_mode: 'telegram_stars (XTR)',
-    entry_fee_inr: Number(process.env.CAMPAIGN_ENTRY_FEE) || 199,
-    stars_amount: Number(process.env.TELEGRAM_STARS_AMOUNT) || 199,
+    currency: 'XTR',
+    stars_amount: 100,
+    display_entry_price: '100 Telegram Stars ⭐️',
     telegram_bot_token_configured: botTokenConfigured,
     timestamp: new Date().toISOString(),
   });

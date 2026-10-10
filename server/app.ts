@@ -45,8 +45,9 @@ app.get('/api/health', (_req: Request, res: Response) => {
     service: 'DiwaliBigdeal Telegram Bot Backend',
     runtime: process.env.VERCEL ? 'vercel-serverless' : 'node',
     payment_mode: 'telegram_stars (XTR)',
-    entry_fee_inr: status.entryFee,
-    stars_amount: status.starsAmount,
+    currency: 'XTR',
+    stars_amount: 100,
+    display_entry_price: '100 Telegram Stars ⭐️',
     telegram_bot_token_configured: status.telegramBotTokenConfigured,
     telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
     timestamp: new Date().toISOString(),
@@ -68,8 +69,10 @@ app.get('/api/telegram/webhook', (_req: Request, res: Response) => {
     supported_methods: ['POST', 'GET'],
     supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
     payment_mode: 'telegram_stars (XTR)',
-    entry_fee_inr: status.entryFee,
-    stars_amount: status.starsAmount,
+    currency: 'XTR',
+    stars_amount: 100,
+    display_entry_price: '100 Telegram Stars ⭐️',
+    invoice_prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
     telegram_bot_token_configured: status.telegramBotTokenConfigured,
     telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
     instructions:
@@ -83,7 +86,6 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     const secretHeader = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
     const isInternalSimulator = req.headers['x-simulator-internal'] === 'true';
 
-    // Validate Telegram secret token ONLY when the user explicitly sets TELEGRAM_WEBHOOK_SECRET in env
     if (
       !isInternalSimulator &&
       process.env.TELEGRAM_WEBHOOK_SECRET &&
@@ -182,7 +184,10 @@ app.get('/api/payment/webhook', (_req: Request, res: Response) => {
     service: 'DiwaliBigdeal Payment Verification Endpoint',
     endpoint: '/api/payment/webhook',
     payment_provider: 'telegram_stars',
-    note: 'Telegram Stars payments are verified natively via pre_checkout_query and successful_payment updates on /api/telegram/webhook, or via HMAC-SHA256 signed POST requests to /api/payment/webhook.',
+    currency: 'XTR',
+    stars_amount: 100,
+    display_entry_price: '100 Telegram Stars ⭐️',
+    note: 'Telegram Stars payments are verified natively via pre_checkout_query and successful_payment updates on /api/telegram/webhook (validating currency=XTR and total_amount=100).',
     timestamp: new Date().toISOString(),
   });
 });
@@ -207,7 +212,8 @@ app.post('/api/payment/webhook', async (req: Request & { rawBody?: string }, res
     const body = req.body as Record<string, any>;
     const paymentId = String(body.payment_id || body.invoice_payload || '');
     const eventStatus: 'PAID' | 'FAILED' = body.status === 'FAILED' ? 'FAILED' : 'PAID';
-    const amountInRupees = Number(body.amount || CONFIG.CAMPAIGN_ENTRY_FEE);
+    const currency = String(body.currency || 'XTR');
+    const totalAmount = Number(body.total_amount ?? body.amount ?? 100);
 
     if (!paymentId) {
       return res.status(400).json({ ok: false, error: 'Missing payment_id in webhook payload' });
@@ -215,13 +221,15 @@ app.post('/api/payment/webhook', async (req: Request & { rawBody?: string }, res
 
     logger.webhook('PaymentWebhook', `Verified payment webhook for ${paymentId}`, {
       eventStatus,
-      amountInRupees,
+      currency,
+      totalAmount,
     });
 
     const result = await processVerifiedPaymentWebhook({
       paymentId,
       eventStatus,
-      amountInRupees,
+      currency,
+      totalAmount,
       telegramPaymentChargeId: body.telegram_payment_charge_id,
     });
 
@@ -257,7 +265,7 @@ app.get('/api/payment/checkout/:paymentId', (req: Request, res: Response) => {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DiwaliBigdeal — Telegram Stars Payment</title>
+  <title>DiwaliBigdeal — 100 Telegram Stars ⭐️ Payment</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 16px; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; max-width: 420px; width: 100%; padding: 24px; box-sizing: border-box; }
@@ -275,9 +283,9 @@ app.get('/api/payment/checkout/:paymentId', (req: Request, res: Response) => {
     <div class="row"><span>Customer</span><strong>${customer.name || '-'}</strong></div>
     <div class="row"><span>Mobile</span><strong>${customer.phone || '-'}</strong></div>
     <div class="row"><span>Campaign</span><strong>DiwaliBigdeal Entry</strong></div>
-    <div class="amount">⭐ ${CONFIG.TELEGRAM_STARS_AMOUNT} Stars (₹${customer.payment_amount})</div>
+    <div class="amount">100 Telegram Stars ⭐️</div>
     <div class="note">
-      In live Telegram, tapping Pay opens the native Telegram Stars (XTR) checkout sheet directly inside Telegram. Your ticket is generated only after Telegram delivers the verified successful_payment update.
+      In live Telegram, tapping Pay opens the native Telegram Stars (XTR) checkout sheet for 100 Telegram Stars ⭐️. Your ticket is generated only after Telegram delivers the verified successful_payment update.
     </div>
   </div>
 </body>
@@ -296,9 +304,8 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
     totalCustomers: customers.length,
     confirmedTickets: customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length,
     pendingPayments: customers.filter((c) => c.payment_status === 'PENDING').length,
-    totalRevenueInr:
-      customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length *
-      CONFIG.CAMPAIGN_ENTRY_FEE,
+    totalStarsCollected:
+      customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length * 100,
   };
 
   return res.json({
@@ -327,12 +334,14 @@ app.post('/api/admin/trigger-payment-webhook', async (req: Request, res: Respons
     const {
       payment_id,
       status = 'PAID',
-      amount = 199,
+      amount = 100,
+      currency = 'XTR',
       tamper_signature = false,
     } = req.body as {
       payment_id: string;
       status?: 'PAID' | 'FAILED';
       amount?: number;
+      currency?: string;
       tamper_signature?: boolean;
     };
 
@@ -344,8 +353,8 @@ app.post('/api/admin/trigger-payment-webhook', async (req: Request, res: Respons
       event: status === 'PAID' ? 'telegram_stars.successful_payment' : 'telegram_stars.failed',
       payment_id,
       status,
-      amount,
-      currency: 'XTR',
+      amount: Number(amount),
+      currency,
       timestamp: new Date().toISOString(),
     };
 
@@ -371,7 +380,8 @@ app.post('/api/admin/trigger-payment-webhook', async (req: Request, res: Respons
     const result = await processVerifiedPaymentWebhook({
       paymentId: payment_id,
       eventStatus: status,
-      amountInRupees: Number(amount),
+      currency,
+      totalAmount: Number(amount),
     });
 
     return res.status(200).json({
@@ -400,7 +410,7 @@ app.post('/api/admin/reset-customer', async (req: Request, res: Response) => {
     [
       '🪔 Welcome to DiwaliBigdeal!',
       '',
-      'Entry Fee: ₹199',
+      'Entry Fee: 100 Telegram Stars ⭐️',
       'Win Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV & Multiple Cash Prizes!',
       '',
       'Please choose an option below:',
@@ -414,7 +424,6 @@ app.post('/api/admin/reset-customer', async (req: Request, res: Response) => {
   });
 });
 
-// Centralized Error Handling Middleware
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   logger.error('ExpressServer', 'Unhandled request error', {
     message: err.message,

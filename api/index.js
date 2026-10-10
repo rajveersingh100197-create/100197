@@ -8,14 +8,15 @@ const path = require('path');
 const crypto = require('crypto');
 
 // ============================================================================
-// 1. CONFIGURATION & ENVIRONMENT VARIABLES
+// 1. CONFIGURATION & ENVIRONMENT VARIABLES (100 Telegram Stars ⭐️ / XTR)
 // ============================================================================
 function getConfig() {
   return {
     APP_URL: process.env.APP_URL || 'https://100197-oqqb.vercel.app',
     CAMPAIGN_NAME: 'DiwaliBigdeal',
-    CAMPAIGN_ENTRY_FEE: Number(process.env.CAMPAIGN_ENTRY_FEE) || 199,
-    TELEGRAM_STARS_AMOUNT: Number(process.env.TELEGRAM_STARS_AMOUNT) || 199,
+    CAMPAIGN_ENTRY_FEE: 100,
+    TELEGRAM_STARS_AMOUNT: 100,
+    DISPLAY_ENTRY_PRICE: '100 Telegram Stars ⭐️',
     PRIZE_ANNOUNCEMENT_DATE: '8 November 2026',
     PRIZE_ANNOUNCEMENT_TIME: '11:59 PM IST',
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
@@ -29,8 +30,9 @@ function getPublicConfigStatus() {
   const cfg = getConfig();
   return {
     campaignName: cfg.CAMPAIGN_NAME,
-    entryFee: cfg.CAMPAIGN_ENTRY_FEE,
-    starsAmount: cfg.TELEGRAM_STARS_AMOUNT,
+    entryFee: 100,
+    starsAmount: 100,
+    displayEntryPrice: cfg.DISPLAY_ENTRY_PRICE,
     prizeAnnouncement: `${cfg.PRIZE_ANNOUNCEMENT_DATE} at ${cfg.PRIZE_ANNOUNCEMENT_TIME}`,
     telegramBotTokenConfigured: Boolean(
       cfg.TELEGRAM_BOT_TOKEN && cfg.TELEGRAM_BOT_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN'
@@ -143,7 +145,6 @@ class DatabaseManager {
   seedDemoEntries() {
     const now = new Date(Date.now() - 3600 * 1000 * 5).toISOString();
     const recent = new Date(Date.now() - 1800 * 1000).toISOString();
-    const fee = getConfig().CAMPAIGN_ENTRY_FEE;
 
     const demo1 = {
       telegram_user_id: '918820144',
@@ -154,7 +155,7 @@ class DatabaseManager {
       conversation_state: ConversationState.COMPLETED,
       payment_id: 'pay_DB2026_99102A',
       payment_status: PaymentStatus.PAID,
-      payment_amount: fee,
+      payment_amount: 100,
       ticket_number: 'DB2026-000001',
       created_at: now,
       updated_at: recent,
@@ -169,7 +170,7 @@ class DatabaseManager {
       conversation_state: ConversationState.WAITING_FOR_PAYMENT,
       payment_id: 'pay_DB2026_88410B',
       payment_status: PaymentStatus.PENDING,
-      payment_amount: fee,
+      payment_amount: 100,
       ticket_number: null,
       created_at: recent,
       updated_at: recent,
@@ -215,7 +216,7 @@ class DatabaseManager {
       conversation_state: ConversationState.IDLE,
       payment_id: null,
       payment_status: PaymentStatus.UNPAID,
-      payment_amount: getConfig().CAMPAIGN_ENTRY_FEE,
+      payment_amount: 100,
       ticket_number: null,
       created_at: now,
       updated_at: now,
@@ -328,7 +329,7 @@ CREATE TABLE IF NOT EXISTS customers (
   conversation_state VARCHAR(64) NOT NULL DEFAULT 'idle',
   payment_id VARCHAR(128) UNIQUE,
   payment_status VARCHAR(32) NOT NULL DEFAULT 'UNPAID',
-  payment_amount INTEGER NOT NULL DEFAULT 199,
+  payment_amount INTEGER NOT NULL DEFAULT 100,
   ticket_number VARCHAR(32) UNIQUE,
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -339,11 +340,11 @@ CREATE TABLE IF NOT EXISTS customers (
 const db = new DatabaseManager();
 
 // ============================================================================
-// 4. TELEGRAM BOT API & TELEGRAM STARS (XTR) SERVICE
+// 4. TELEGRAM BOT API & TELEGRAM STARS (100 XTR) SERVICE
 // ============================================================================
 const MAIN_MENU_INLINE_KEYBOARD = {
   inline_keyboard: [
-    [{ text: '🎟️ Join ₹199 Entry', callback_data: 'menu_join_199' }],
+    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
     [
       { text: '🎫 My Ticket', callback_data: 'menu_my_ticket' },
       { text: '🏆 Prize Details', callback_data: 'menu_prize_details' },
@@ -415,7 +416,13 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
   return outgoingRecord;
 }
 
-async function createTelegramStarsInvoiceLink(paymentId, starsAmount) {
+/**
+ * Creates a Telegram Stars invoice link with:
+ * - currency: "XTR"
+ * - provider_token: ""
+ * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
+ */
+async function createTelegramStarsInvoiceLink(paymentId) {
   const token = getConfig().TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
     return null;
@@ -428,11 +435,11 @@ async function createTelegramStarsInvoiceLink(paymentId, starsAmount) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         title: 'DiwaliBigdeal Entry',
-        description: 'Confirm your DiwaliBigdeal ₹199 campaign entry.',
+        description: 'Confirm your DiwaliBigdeal campaign entry (100 Telegram Stars ⭐️).',
         payload: paymentId,
-        provider_token: '', // Empty string for Telegram Stars (XTR)
+        provider_token: '',
         currency: 'XTR',
-        prices: [{ label: 'DiwaliBigdeal Entry (₹199)', amount: starsAmount }],
+        prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
       }),
     });
 
@@ -440,16 +447,11 @@ async function createTelegramStarsInvoiceLink(paymentId, starsAmount) {
       const data = await response.json();
       if (data.ok && data.result) {
         logger.info('TelegramStars', `Created Telegram Stars invoice link for ${paymentId}`, {
-          starsAmount,
+          currency: 'XTR',
+          amount: 100,
         });
         return data.result;
       }
-    } else {
-      const errText = await response.text();
-      logger.warn('TelegramStars', 'Telegram createInvoiceLink returned error', {
-        status: response.status,
-        response: errText,
-      });
     }
   } catch (err) {
     logger.error('TelegramStars', 'Failed to call createInvoiceLink', {
@@ -459,7 +461,14 @@ async function createTelegramStarsInvoiceLink(paymentId, starsAmount) {
   return null;
 }
 
-async function sendTelegramStarsInvoice(chatId, paymentId, starsAmount) {
+/**
+ * Sends a native Telegram Stars invoice with:
+ * - currency: "XTR"
+ * - provider_token: ""
+ * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
+ * - No Cancel button
+ */
+async function sendTelegramStarsInvoice(chatId, paymentId) {
   const cid = String(chatId);
   const token = getConfig().TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN' || cid.startsWith('sim_')) {
@@ -476,12 +485,12 @@ async function sendTelegramStarsInvoice(chatId, paymentId, starsAmount) {
         title: 'DiwaliBigdeal Entry',
         description: 'Please complete your payment to confirm your DiwaliBigdeal entry.',
         payload: paymentId,
-        provider_token: '', // Empty string for Telegram Stars (XTR)
+        provider_token: '',
         currency: 'XTR',
-        prices: [{ label: 'DiwaliBigdeal Entry (₹199)', amount: starsAmount }],
+        prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
         reply_markup: {
           // Strictly NO Cancel button
-          inline_keyboard: [[{ text: '💰 PAY ₹199', pay: true }]],
+          inline_keyboard: [[{ text: '💰 Pay 100 Telegram Stars ⭐️', pay: true }]],
         },
       }),
     });
@@ -538,14 +547,14 @@ async function answerTelegramCallbackQuery(callbackQueryId, text) {
 }
 
 // ============================================================================
-// 5. ATOMIC TICKET GENERATOR & PAYMENT VERIFICATION
+// 5. ATOMIC TICKET GENERATOR & PAYMENT VERIFICATION (100 XTR)
 // ============================================================================
-function issueVerifiedTicket(paymentId, verifiedStatus, verifiedAmount) {
+function issueVerifiedTicket(paymentId, verifiedStatus, verifiedStarsAmount, telegramPaymentChargeId) {
   if (verifiedStatus !== PaymentStatus.PAID) {
     throw new Error('Cannot generate a confirmed ticket for an unpaid or failed payment.');
   }
-  if (verifiedAmount < 199) {
-    throw new Error(`Invalid payment amount ₹${verifiedAmount}. Expected ₹199.`);
+  if (Number(verifiedStarsAmount) !== 100) {
+    throw new Error(`Invalid Telegram Stars amount: ${verifiedStarsAmount}. Expected exactly 100 XTR.`);
   }
 
   const customer = db.getCustomerByPaymentId(paymentId);
@@ -553,6 +562,19 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedAmount) {
     throw new Error(`Customer record not found for payment_id: ${paymentId}`);
   }
 
+  // Prevent duplicate tickets by telegram_payment_charge_id
+  if (telegramPaymentChargeId) {
+    const existingChargeTicket = db.getProcessedWebhookTicket(`charge_${telegramPaymentChargeId}`);
+    if (existingChargeTicket && customer.ticket_number) {
+      return {
+        customer,
+        ticketNumber: customer.ticket_number,
+        alreadyIssued: true,
+      };
+    }
+  }
+
+  // Prevent duplicate tickets by payment_id
   const existingWebhookTicket = db.getProcessedWebhookTicket(paymentId);
   if (existingWebhookTicket && customer.ticket_number) {
     return {
@@ -564,6 +586,9 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedAmount) {
 
   if (customer.payment_status === PaymentStatus.PAID && customer.ticket_number) {
     db.markWebhookProcessed(paymentId, customer.ticket_number);
+    if (telegramPaymentChargeId) {
+      db.markWebhookProcessed(`charge_${telegramPaymentChargeId}`, customer.ticket_number);
+    }
     return {
       customer,
       ticketNumber: customer.ticket_number,
@@ -574,15 +599,20 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedAmount) {
   const newTicketNumber = db.allocateNextTicketNumber();
   const updatedCustomer = db.updateCustomer(customer.telegram_user_id, {
     payment_status: PaymentStatus.PAID,
-    payment_amount: verifiedAmount,
+    payment_amount: 100,
     ticket_number: newTicketNumber,
     conversation_state: ConversationState.COMPLETED,
   });
 
   db.markWebhookProcessed(paymentId, newTicketNumber);
+  if (telegramPaymentChargeId) {
+    db.markWebhookProcessed(`charge_${telegramPaymentChargeId}`, newTicketNumber);
+  }
+
   logger.info('TicketGenerator', `Issued unique ticket ${newTicketNumber}`, {
     telegram_user_id: updatedCustomer.telegram_user_id,
     payment_id: paymentId,
+    telegram_payment_charge_id: telegramPaymentChargeId,
   });
 
   return {
@@ -594,8 +624,7 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedAmount) {
 
 async function createPaymentOrderForCustomer(customer) {
   const cfg = getConfig();
-  const amountInRupees = cfg.CAMPAIGN_ENTRY_FEE;
-  const starsAmount = cfg.TELEGRAM_STARS_AMOUNT;
+  const starsAmount = 100;
 
   let paymentId = customer.payment_id;
   if (!paymentId || customer.payment_status === PaymentStatus.FAILED) {
@@ -604,7 +633,7 @@ async function createPaymentOrderForCustomer(customer) {
   }
 
   let paymentUrl = `${cfg.APP_URL}/api/payment/checkout/${paymentId}`;
-  const starsInvoiceUrl = await createTelegramStarsInvoiceLink(paymentId, starsAmount);
+  const starsInvoiceUrl = await createTelegramStarsInvoiceLink(paymentId);
   if (starsInvoiceUrl) {
     paymentUrl = starsInvoiceUrl;
   }
@@ -612,13 +641,13 @@ async function createPaymentOrderForCustomer(customer) {
   db.updateCustomer(customer.telegram_user_id, {
     payment_id: paymentId,
     payment_status: PaymentStatus.PENDING,
-    payment_amount: amountInRupees,
+    payment_amount: starsAmount,
     conversation_state: ConversationState.WAITING_FOR_PAYMENT,
   });
 
   return {
     payment_id: paymentId,
-    payment_amount: amountInRupees,
+    payment_amount: starsAmount,
     stars_amount: starsAmount,
     payment_url: paymentUrl,
     provider: 'telegram_stars',
@@ -644,7 +673,13 @@ function verifyPaymentWebhookSignature(rawBody, receivedSignature) {
   }
 }
 
-async function processVerifiedPaymentWebhook({ paymentId, eventStatus, amountInRupees, telegramPaymentChargeId }) {
+async function processVerifiedPaymentWebhook({
+  paymentId,
+  eventStatus,
+  currency = 'XTR',
+  totalAmount = 100,
+  telegramPaymentChargeId,
+}) {
   const customer = db.getCustomerByPaymentId(paymentId);
   if (!customer) {
     throw new Error(`No customer found for payment_id: ${paymentId}`);
@@ -663,7 +698,20 @@ async function processVerifiedPaymentWebhook({ paymentId, eventStatus, amountInR
     };
   }
 
-  const issuance = issueVerifiedTicket(paymentId, PaymentStatus.PAID, amountInRupees);
+  if (currency !== 'XTR') {
+    throw new Error(`Invalid payment currency: ${currency}. Expected XTR.`);
+  }
+
+  if (Number(totalAmount) !== 100) {
+    throw new Error(`Invalid payment amount: ${totalAmount}. Expected exactly 100 Telegram Stars.`);
+  }
+
+  const issuance = issueVerifiedTicket(
+    paymentId,
+    PaymentStatus.PAID,
+    100,
+    telegramPaymentChargeId
+  );
 
   if (!issuance.alreadyIssued) {
     const successMessage = [
@@ -673,7 +721,7 @@ async function processVerifiedPaymentWebhook({ paymentId, eventStatus, amountInR
       '',
       `🎫 Ticket No: ${issuance.ticketNumber}`,
       '',
-      '💰 Amount Paid: ₹199',
+      '💰 Amount Paid: 100 Telegram Stars ⭐️',
       '',
       '🏆 Good Luck!',
       '',
@@ -705,7 +753,7 @@ async function processVerifiedPaymentWebhook({ paymentId, eventStatus, amountInR
 }
 
 // ============================================================================
-// 6. CONVERSATION STATE MACHINE & BOT FLOW
+// 6. CONVERSATION STATE MACHINE & BOT FLOW (100 Telegram Stars ⭐️)
 // ============================================================================
 function validateIndianMobileNumber(input) {
   const cleaned = String(input || '').replace(/[\s\-()]/g, '');
@@ -721,7 +769,7 @@ const BOT_MESSAGES = {
     [
       '🪔 Welcome to DiwaliBigdeal!',
       '',
-      'Entry Fee: ₹199',
+      'Entry Fee: 100 Telegram Stars ⭐️',
       'Win Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV & Multiple Cash Prizes!',
       '',
       'Please choose an option below:',
@@ -731,7 +779,7 @@ const BOT_MESSAGES = {
     [
       '🎟️ DIWALI BIGDEAL',
       '',
-      'Entry Fee: ₹199',
+      'Entry Fee: 100 Telegram Stars ⭐️',
       '',
       'Join now for your chance to win exciting prizes.',
     ].join('\n'),
@@ -759,7 +807,7 @@ const BOT_MESSAGES = {
       `📱 Mobile: ${phone}`,
       `🏠 Address: ${address}`,
       '',
-      '🎟️ Entry Fee: ₹199',
+      '🎟️ Entry Fee: 100 Telegram Stars ⭐️',
       '',
       'Are these details correct?',
     ].join('\n'),
@@ -768,7 +816,7 @@ const BOT_MESSAGES = {
     [
       '💳 PAYMENT',
       '',
-      'Amount: ₹199',
+      'Amount: 100 Telegram Stars ⭐️',
       '',
       'Please complete your payment to confirm your DiwaliBigdeal entry.',
     ].join('\n'),
@@ -782,7 +830,7 @@ const BOT_MESSAGES = {
       `👤 Name: ${name}`,
       `📱 Mobile: ${phone}`,
       '',
-      '💰 Entry: ₹199',
+      '💰 Entry: 100 Telegram Stars ⭐️',
       '✅ Status: CONFIRMED',
       '',
       '📅 Prize Announcement:',
@@ -796,7 +844,7 @@ const BOT_MESSAGES = {
     [
       '🏆 DIWALI BIGDEAL',
       '',
-      '🎟️ Entry Fee: ₹199',
+      '🎟️ Entry Fee: 100 Telegram Stars ⭐️',
       '',
       '🚙 Mahindra Thar ROXX',
       '📺 Smart LED TV',
@@ -825,7 +873,12 @@ async function sendConfirmationScreen(customer) {
   // Strictly NO Cancel button
   await sendTelegramMessage(customer.telegram_chat_id, text, {
     inline_keyboard: [
-      [{ text: '✅ Confirm & Pay ₹199', callback_data: 'action_confirm_pay_199' }],
+      [
+        {
+          text: '✅ Confirm & Pay 100 Telegram Stars ⭐️',
+          callback_data: 'action_confirm_pay_199',
+        },
+      ],
       [{ text: '✏️ Edit Details', callback_data: 'action_edit_details' }],
     ],
   });
@@ -841,8 +894,11 @@ async function sendPaymentScreen(customer) {
     inline_keyboard: [
       [
         isNativeTelegramStarsLink
-          ? { text: '💰 PAY ₹199', url: paymentOrder.payment_url }
-          : { text: '💰 PAY ₹199', callback_data: `pay_link_${paymentOrder.payment_id}` },
+          ? { text: '💰 Pay 100 Telegram Stars ⭐️', url: paymentOrder.payment_url }
+          : {
+              text: '💰 Pay 100 Telegram Stars ⭐️',
+              callback_data: `pay_link_${paymentOrder.payment_id}`,
+            },
       ],
     ],
   });
@@ -871,7 +927,9 @@ async function handleMyTicketTrigger(customer) {
     );
   } else {
     await sendTelegramMessage(customer.telegram_chat_id, BOT_MESSAGES.myTicketNotFound(), {
-      inline_keyboard: [[{ text: '🎟️ Join ₹199 Entry', callback_data: 'menu_join_199' }]],
+      inline_keyboard: [
+        [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
+      ],
     });
   }
 }
@@ -893,26 +951,49 @@ async function handleSupportTrigger(customer) {
 }
 
 async function handleTelegramUpdate(update) {
-  // 0. Handle Telegram Stars `pre_checkout_query`
+  // 0. Handle Telegram Stars `pre_checkout_query` (Validate currency === "XTR" and total_amount === 100)
   if (update.pre_checkout_query) {
     const pcq = update.pre_checkout_query;
     const paymentId = pcq.invoice_payload;
-    const customer = db.getCustomerByPaymentId(paymentId);
 
+    if (pcq.currency !== 'XTR' || Number(pcq.total_amount) !== 100) {
+      logger.security(
+        'TelegramStars',
+        `Rejected pre_checkout_query: invalid currency (${pcq.currency}) or amount (${pcq.total_amount})`,
+        { paymentId, currency: pcq.currency, total_amount: pcq.total_amount }
+      );
+      await answerTelegramPreCheckoutQuery(
+        pcq.id,
+        false,
+        'Invalid payment currency or amount. Entry requires exactly 100 Telegram Stars (XTR).'
+      );
+      return null;
+    }
+
+    const customer = db.getCustomerByPaymentId(paymentId);
     if (!customer) {
       await answerTelegramPreCheckoutQuery(
         pcq.id,
         false,
-        'Payment session expired or not found. Please tap Confirm & Pay ₹199 again.'
+        'Payment session expired or not found. Please tap Confirm & Pay 100 Telegram Stars ⭐️ again.'
       );
       return null;
+    }
+
+    if (customer.payment_status === PaymentStatus.PAID && customer.ticket_number) {
+      await answerTelegramPreCheckoutQuery(
+        pcq.id,
+        false,
+        `You already have a confirmed entry (Ticket: ${customer.ticket_number}).`
+      );
+      return customer;
     }
 
     await answerTelegramPreCheckoutQuery(pcq.id, true);
     return customer;
   }
 
-  // 1. Handle Telegram Stars `message.successful_payment`
+  // 1. Handle Telegram Stars `message.successful_payment` (Validate currency === "XTR" and total_amount === 100)
   if (update.message && update.message.successful_payment) {
     const msg = update.message;
     const sp = msg.successful_payment;
@@ -922,10 +1003,25 @@ async function handleTelegramUpdate(update) {
 
     db.getOrCreateCustomer(userId, chatId);
 
+    if (sp.currency !== 'XTR' || Number(sp.total_amount) !== 100) {
+      logger.security(
+        'TelegramStars',
+        `Rejected successful_payment due to currency/amount mismatch`,
+        {
+          telegram_user_id: userId,
+          payment_id: paymentId,
+          currency: sp.currency,
+          total_amount: sp.total_amount,
+        }
+      );
+      return db.getCustomerByUserId(userId);
+    }
+
     const result = await processVerifiedPaymentWebhook({
       paymentId,
       eventStatus: 'PAID',
-      amountInRupees: getConfig().CAMPAIGN_ENTRY_FEE,
+      currency: sp.currency,
+      totalAmount: sp.total_amount,
       telegramPaymentChargeId: sp.telegram_payment_charge_id,
     });
 
@@ -940,16 +1036,19 @@ async function handleTelegramUpdate(update) {
     const data = String(cb.data || '').trim();
 
     const buttonLabelMap = {
-      menu_join_199: '🎟️ Join ₹199 Entry',
+      menu_join_199: '🎟️ Join Entry (100 Telegram Stars ⭐️)',
       action_continue_join: '🚀 Continue',
-      action_confirm_pay_199: '✅ Confirm & Pay ₹199',
+      action_confirm_pay_199: '✅ Confirm & Pay 100 Telegram Stars ⭐️',
       action_edit_details: '✏️ Edit Details',
       menu_my_ticket: '🎫 My Ticket',
       menu_prize_details: '🏆 Prize Details',
       menu_support: '🆘 Support',
     };
 
-    const tapDisplay = buttonLabelMap[data] || (data.startsWith('pay_link_') ? '💰 PAY ₹199' : data);
+    const tapDisplay =
+      buttonLabelMap[data] ||
+      (data.startsWith('pay_link_') ? '💰 Pay 100 Telegram Stars ⭐️' : data);
+
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),
       chat_id: chatId,
@@ -989,7 +1088,7 @@ async function handleTelegramUpdate(update) {
 
     if (data.startsWith('pay_link_')) {
       const paymentId = data.replace('pay_link_', '');
-      await sendTelegramStarsInvoice(chatId, paymentId, getConfig().TELEGRAM_STARS_AMOUNT);
+      await sendTelegramStarsInvoice(chatId, paymentId);
       return db.getCustomerByUserId(userId);
     }
 
@@ -1043,7 +1142,11 @@ async function handleTelegramUpdate(update) {
       return customer;
     }
 
-    if (text === '🎟️ Join ₹199 Entry' || text === '/join') {
+    if (
+      text === '🎟️ Join Entry (100 Telegram Stars ⭐️)' ||
+      text === '🎟️ Join ₹199 Entry' ||
+      text === '/join'
+    ) {
       await handleJoinEntryTrigger(customer);
       return db.getCustomerByUserId(userId);
     }
@@ -1170,7 +1273,6 @@ function sendJson(res, statusCode, payload) {
 
 // ============================================================================
 // 8. UNIFIED SELF-CONTAINED VERCEL SERVERLESS HANDLER (`/api/index.js`)
-// Zero relative `require()` calls — 100% self-contained!
 // ============================================================================
 module.exports = async function handler(req, res) {
   try {
@@ -1187,8 +1289,9 @@ module.exports = async function handler(req, res) {
         service: 'DiwaliBigdeal Telegram Bot Backend',
         runtime: process.env.VERCEL ? 'vercel-serverless' : 'node',
         payment_mode: 'telegram_stars (XTR)',
-        entry_fee_inr: cfg.entryFee,
-        stars_amount: cfg.starsAmount,
+        currency: 'XTR',
+        stars_amount: 100,
+        display_entry_price: '100 Telegram Stars ⭐️',
         telegram_bot_token_configured: cfg.telegramBotTokenConfigured,
         timestamp: new Date().toISOString(),
       });
@@ -1206,8 +1309,10 @@ module.exports = async function handler(req, res) {
           supported_methods: ['POST', 'GET'],
           supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
           payment_mode: 'telegram_stars (XTR)',
-          entry_fee_inr: status.entryFee,
-          stars_amount: status.starsAmount,
+          currency: 'XTR',
+          stars_amount: 100,
+          display_entry_price: '100 Telegram Stars ⭐️',
+          invoice_prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
           telegram_bot_token_configured: status.telegramBotTokenConfigured,
           telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
           instructions:
@@ -1286,7 +1391,10 @@ module.exports = async function handler(req, res) {
           endpoint: '/api/payment/webhook',
           status: 'READY',
           payment_provider: 'telegram_stars',
-          note: 'Telegram Stars payments are verified natively via pre_checkout_query and successful_payment updates on /api/telegram/webhook, or via HMAC-SHA256 signed POST requests to /api/payment/webhook.',
+          currency: 'XTR',
+          stars_amount: 100,
+          display_entry_price: '100 Telegram Stars ⭐️',
+          note: 'Telegram Stars payments are verified natively via pre_checkout_query and successful_payment updates on /api/telegram/webhook (validating currency=XTR and total_amount=100).',
           timestamp: new Date().toISOString(),
         });
       }
@@ -1311,7 +1419,8 @@ module.exports = async function handler(req, res) {
 
       const paymentId = String(body.payment_id || body.invoice_payload || '');
       const eventStatus = body.status === 'FAILED' ? 'FAILED' : 'PAID';
-      const amountInRupees = Number(body.amount || getConfig().CAMPAIGN_ENTRY_FEE);
+      const currency = String(body.currency || 'XTR');
+      const totalAmount = Number(body.total_amount ?? body.amount ?? 100);
 
       if (!paymentId) {
         return sendJson(res, 400, { ok: false, error: 'Missing payment_id in webhook payload' });
@@ -1320,7 +1429,8 @@ module.exports = async function handler(req, res) {
       const result = await processVerifiedPaymentWebhook({
         paymentId,
         eventStatus,
-        amountInRupees,
+        currency,
+        totalAmount,
         telegramPaymentChargeId: body.telegram_payment_charge_id,
       });
 
@@ -1335,14 +1445,13 @@ module.exports = async function handler(req, res) {
       const customers = db.listAllCustomers();
       const recentLogs = logger.getRecentLogs(80);
       const configStatus = getPublicConfigStatus();
-      const fee = getConfig().CAMPAIGN_ENTRY_FEE;
 
       const stats = {
         totalCustomers: customers.length,
         confirmedTickets: customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length,
         pendingPayments: customers.filter((c) => c.payment_status === 'PENDING').length,
-        totalRevenueInr:
-          customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length * fee,
+        totalStarsCollected:
+          customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length * 100,
       };
 
       return sendJson(res, 200, {
@@ -1390,7 +1499,8 @@ module.exports = async function handler(req, res) {
       const { body } = await readRawAndJsonBody(req);
       const payment_id = body.payment_id;
       const status = body.status || 'PAID';
-      const amount = Number(body.amount || 199);
+      const amount = Number(body.amount ?? 100);
+      const currency = String(body.currency || 'XTR');
       const tamper_signature = Boolean(body.tamper_signature);
 
       if (!payment_id) {
@@ -1402,7 +1512,7 @@ module.exports = async function handler(req, res) {
         payment_id,
         status,
         amount,
-        currency: 'XTR',
+        currency,
         timestamp: new Date().toISOString(),
       };
 
@@ -1423,7 +1533,8 @@ module.exports = async function handler(req, res) {
       const result = await processVerifiedPaymentWebhook({
         paymentId: payment_id,
         eventStatus: status,
-        amountInRupees: amount,
+        currency,
+        totalAmount: amount,
       });
 
       return sendJson(res, 200, {
@@ -1448,7 +1559,7 @@ module.exports = async function handler(req, res) {
         [
           '🪔 Welcome to DiwaliBigdeal!',
           '',
-          'Entry Fee: ₹199',
+          'Entry Fee: 100 Telegram Stars ⭐️',
           'Win Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV & Multiple Cash Prizes!',
           '',
           'Please choose an option below:',

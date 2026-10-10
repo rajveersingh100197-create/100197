@@ -21,26 +21,25 @@ import {
 } from './telegramService';
 
 /**
- * Payment Service & Telegram Stars Verification
+ * Payment Service & Telegram Stars (100 XTR) Verification
  *
  * Rules Enforced:
- * 1. Create a ₹199 payment request (using Telegram Stars XTR invoice) when customer taps "✅ Confirm & Pay ₹199".
+ * 1. Create a 100 Telegram Stars ⭐️ payment request (currency="XTR", prices=[{"label":"DiwaliBigdeal Entry","amount":100}]).
  * 2. Do NOT mark the entry as paid merely because the customer clicked the payment button.
- * 3. Verify payment via Telegram's server-side `pre_checkout_query` + `message.successful_payment` update
- *    (or signed server-side `/api/payment/webhook`).
+ * 3. Validate `pre_checkout_query` (currency === "XTR" and total_amount === 100) and `message.successful_payment`
+ *    (currency === "XTR" and total_amount === 100).
  * 4. Only after receiving a verified successful payment:
  *    - payment_status = PAID
  *    - generate a unique ticket number (DB2026-000001...)
- *    - send the exact automatic Telegram confirmation message to the same Telegram chat.
+ *    - prevent duplicate tickets for the same payment
+ *    - send the automatic Telegram confirmation message to the same Telegram chat.
  */
 
 export async function createPaymentOrderForCustomer(
   customer: CustomerRecord
 ): Promise<PaymentCreationResult> {
-  const amountInRupees = CONFIG.CAMPAIGN_ENTRY_FEE; // 199
-  const starsAmount = CONFIG.TELEGRAM_STARS_AMOUNT; // 199 XTR Stars
+  const starsAmount = 100;
 
-  // Reuse existing PENDING payment_id if already in waiting_for_payment state and unpaid
   let paymentId = customer.payment_id;
   if (!paymentId || customer.payment_status === PaymentStatus.FAILED) {
     const randomSuffix = crypto.randomBytes(4).toString('hex').toUpperCase();
@@ -49,10 +48,7 @@ export async function createPaymentOrderForCustomer(
 
   let paymentUrl = `${CONFIG.APP_URL}/api/payment/checkout/${paymentId}`;
 
-  // Attempt to create a native Telegram Stars invoice link (currency: "XTR", provider_token: "")
-  // When TELEGRAM_BOT_TOKEN is configured, this returns a native `https://t.me/$...` invoice link
-  // that opens the Telegram Stars payment sheet right inside the Telegram app!
-  const starsInvoiceUrl = await createTelegramStarsInvoiceLink(paymentId, starsAmount);
+  const starsInvoiceUrl = await createTelegramStarsInvoiceLink(paymentId);
   if (starsInvoiceUrl) {
     paymentUrl = starsInvoiceUrl;
   }
@@ -61,13 +57,14 @@ export async function createPaymentOrderForCustomer(
   db.updateCustomer(customer.telegram_user_id, {
     payment_id: paymentId,
     payment_status: PaymentStatus.PENDING,
-    payment_amount: amountInRupees,
+    payment_amount: starsAmount,
     conversation_state: ConversationState.WAITING_FOR_PAYMENT,
   });
 
-  logger.info('PaymentService', `Telegram Stars payment request created for ₹${amountInRupees}`, {
+  logger.info('PaymentService', `Telegram Stars payment request created for 100 Telegram Stars ⭐️`, {
     telegram_user_id: customer.telegram_user_id,
     payment_id: paymentId,
+    currency: 'XTR',
     stars_amount: starsAmount,
     hasNativeStarsUrl: Boolean(starsInvoiceUrl),
     payment_status: PaymentStatus.PENDING,
@@ -75,7 +72,7 @@ export async function createPaymentOrderForCustomer(
 
   return {
     payment_id: paymentId,
-    payment_amount: amountInRupees,
+    payment_amount: starsAmount,
     stars_amount: starsAmount,
     payment_url: paymentUrl,
     provider: 'telegram_stars',
@@ -84,9 +81,6 @@ export async function createPaymentOrderForCustomer(
   };
 }
 
-/**
- * Generates an HMAC-SHA256 signature for a raw webhook payload using PAYMENT_WEBHOOK_SECRET.
- */
 export function computeWebhookSignature(
   rawBody: string,
   secret = CONFIG.PAYMENT_WEBHOOK_SECRET
@@ -94,9 +88,6 @@ export function computeWebhookSignature(
   return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 }
 
-/**
- * Verifies the incoming payment webhook HMAC-SHA256 signature using constant-time comparison.
- */
 export function verifyPaymentWebhookSignature(
   rawBody: string,
   receivedSignature?: string
@@ -120,18 +111,26 @@ export function verifyPaymentWebhookSignature(
 export interface WebhookProcessInput {
   paymentId: string;
   eventStatus: 'PAID' | 'FAILED';
-  amountInRupees: number;
+  currency?: string;
+  totalAmount?: number;
   telegramPaymentChargeId?: string;
 }
 
 /**
- * Processes a verified payment event (from Telegram `successful_payment` update or verified webhook):
+ * Processes a verified Telegram Stars payment event:
+ * - Validates currency === "XTR" and totalAmount === 100
  * - If FAILED: marks payment_status = FAILED, never issues a ticket.
  * - If PAID: atomically marks payment_status = PAID, generates unique ticket DB2026-XXXXXX (idempotent),
- *   sets conversation_state = completed, and sends the exact automatic Telegram confirmation message.
+ *   sets conversation_state = completed, and sends the automatic Telegram confirmation message.
  */
 export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) {
-  const { paymentId, eventStatus, amountInRupees, telegramPaymentChargeId } = input;
+  const {
+    paymentId,
+    eventStatus,
+    currency = 'XTR',
+    totalAmount = 100,
+    telegramPaymentChargeId,
+  } = input;
 
   const customer = db.getCustomerByPaymentId(paymentId);
   if (!customer) {
@@ -154,11 +153,32 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
     };
   }
 
-  // Verified successful payment -> Issue unique ticket atomically & idempotently
-  const issuance = issueVerifiedTicket(paymentId, PaymentStatus.PAID, amountInRupees);
+  if (currency !== 'XTR') {
+    logger.security('PaymentVerification', `Rejected payment with invalid currency: ${currency}`, {
+      paymentId,
+      currency,
+    });
+    throw new Error(`Invalid payment currency: ${currency}. Expected XTR.`);
+  }
 
-  // Only send the Telegram success confirmation message on first verified webhook processing
-  // (Prevents duplicate messages if a webhook is retried)
+  if (Number(totalAmount) !== 100) {
+    logger.security(
+      'PaymentVerification',
+      `Rejected payment with invalid total_amount: ${totalAmount}`,
+      { paymentId, totalAmount }
+    );
+    throw new Error(`Invalid payment amount: ${totalAmount}. Expected exactly 100 Telegram Stars.`);
+  }
+
+  // Verified successful payment -> Issue unique ticket atomically & idempotently
+  const issuance = issueVerifiedTicket(
+    paymentId,
+    PaymentStatus.PAID,
+    100,
+    telegramPaymentChargeId
+  );
+
+  // Only send the Telegram success confirmation message on first verified payment processing
   if (!issuance.alreadyIssued) {
     const successMessage = [
       '🎉 PAYMENT SUCCESSFUL!',
@@ -167,7 +187,7 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
       '',
       `🎫 Ticket No: ${issuance.ticketNumber}`,
       '',
-      '💰 Amount Paid: ₹199',
+      '💰 Amount Paid: 100 Telegram Stars ⭐️',
       '',
       '🏆 Good Luck!',
       '',

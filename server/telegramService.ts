@@ -18,8 +18,8 @@ import {
  *
  * Handles:
  * - Sending messages & inline keyboards via official Telegram Bot API (`sendMessage`)
- * - Creating Telegram Stars invoice links (`createInvoiceLink` with currency="XTR" and provider_token="")
- * - Sending native Telegram Stars invoices (`sendInvoice` with currency="XTR" and provider_token="")
+ * - Creating Telegram Stars invoice links (`createInvoiceLink` with currency="XTR", amount=100)
+ * - Sending native Telegram Stars invoices (`sendInvoice` with currency="XTR", amount=100)
  * - Answering pre-checkout queries (`answerPreCheckoutQuery`)
  * - Answering callback queries (`answerCallbackQuery`)
  * - Validating incoming Telegram webhook secret header (`X-Telegram-Bot-Api-Secret-Token`)
@@ -27,7 +27,7 @@ import {
 
 export const MAIN_MENU_INLINE_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
-    [{ text: '🎟️ Join ₹199 Entry', callback_data: 'menu_join_199' }],
+    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)', callback_data: 'menu_join_199' }],
     [
       { text: '🎫 My Ticket', callback_data: 'menu_my_ticket' },
       { text: '🏆 Prize Details', callback_data: 'menu_prize_details' },
@@ -38,7 +38,7 @@ export const MAIN_MENU_INLINE_KEYBOARD: InlineKeyboardMarkup = {
 
 export const MAIN_MENU_REPLY_KEYBOARD: ReplyKeyboardMarkup = {
   keyboard: [
-    [{ text: '🎟️ Join ₹199 Entry' }],
+    [{ text: '🎟️ Join Entry (100 Telegram Stars ⭐️)' }],
     [{ text: '🎫 My Ticket' }, { text: '🏆 Prize Details' }],
     [{ text: '🆘 Support' }],
   ],
@@ -84,7 +84,6 @@ export async function sendTelegramMessage(
 
   db.appendChatMessage(cid, outgoingRecord);
 
-  // If real TELEGRAM_BOT_TOKEN is configured, dispatch to api.telegram.org
   if (
     CONFIG.TELEGRAM_BOT_TOKEN &&
     CONFIG.TELEGRAM_BOT_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN' &&
@@ -132,12 +131,13 @@ export async function sendTelegramMessage(
 }
 
 /**
- * Creates a native Telegram Stars invoice URL via `createInvoiceLink` (currency: "XTR", provider_token: "")
- * so the `[💰 PAY ₹199]` button opens the native in-app Telegram Stars checkout modal directly inside Telegram.
+ * Creates a native Telegram Stars invoice URL via `createInvoiceLink`:
+ * - currency: "XTR"
+ * - provider_token: ""
+ * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
  */
 export async function createTelegramStarsInvoiceLink(
-  paymentId: string,
-  starsAmount: number
+  paymentId: string
 ): Promise<string | null> {
   if (
     !CONFIG.TELEGRAM_BOT_TOKEN ||
@@ -153,11 +153,11 @@ export async function createTelegramStarsInvoiceLink(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         title: 'DiwaliBigdeal Entry',
-        description: 'Confirm your DiwaliBigdeal ₹199 campaign entry.',
+        description: 'Confirm your DiwaliBigdeal campaign entry (100 Telegram Stars ⭐️).',
         payload: paymentId,
-        provider_token: '', // Must be empty string for Telegram Stars (XTR)
+        provider_token: '',
         currency: 'XTR',
-        prices: [{ label: 'DiwaliBigdeal Entry (₹199)', amount: starsAmount }],
+        prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
       }),
     });
 
@@ -165,7 +165,8 @@ export async function createTelegramStarsInvoiceLink(
       const data = (await response.json()) as { ok: boolean; result?: string };
       if (data.ok && data.result) {
         logger.info('TelegramStars', `Created Telegram Stars invoice link for ${paymentId}`, {
-          starsAmount,
+          currency: 'XTR',
+          amount: 100,
         });
         return data.result;
       }
@@ -186,13 +187,15 @@ export async function createTelegramStarsInvoiceLink(
 }
 
 /**
- * Sends a native Telegram Stars invoice directly to the chat via `sendInvoice` (currency: "XTR")
- * when the user taps a callback button or requests an invoice.
+ * Sends a native Telegram Stars invoice directly to the chat via `sendInvoice`:
+ * - currency: "XTR"
+ * - provider_token: ""
+ * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
+ * - No Cancel button
  */
 export async function sendTelegramStarsInvoice(
   chatId: string | number,
-  paymentId: string,
-  starsAmount: number
+  paymentId: string
 ): Promise<boolean> {
   const cid = String(chatId);
   if (
@@ -213,12 +216,12 @@ export async function sendTelegramStarsInvoice(
         title: 'DiwaliBigdeal Entry',
         description: 'Please complete your payment to confirm your DiwaliBigdeal entry.',
         payload: paymentId,
-        provider_token: '', // Empty string for Telegram Stars (XTR)
+        provider_token: '',
         currency: 'XTR',
-        prices: [{ label: 'DiwaliBigdeal Entry (₹199)', amount: starsAmount }],
+        prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
         reply_markup: {
           // Strictly NO Cancel button
-          inline_keyboard: [[{ text: '💰 PAY ₹199', pay: true }]],
+          inline_keyboard: [[{ text: '💰 Pay 100 Telegram Stars ⭐️', pay: true }]],
         },
       }),
     });
@@ -226,7 +229,8 @@ export async function sendTelegramStarsInvoice(
     if (response.ok) {
       logger.info('TelegramStars', `Sent native Telegram Stars invoice to chat_id=${cid}`, {
         paymentId,
-        starsAmount,
+        currency: 'XTR',
+        amount: 100,
       });
       return true;
     } else {

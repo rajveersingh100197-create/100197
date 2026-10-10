@@ -8,8 +8,6 @@ import {
   Send,
   RotateCcw,
   ShieldCheck,
-  Terminal,
-  Database,
   CheckCircle2,
   AlertTriangle,
   ExternalLink,
@@ -17,10 +15,6 @@ import {
   Check,
   RefreshCw,
   Search,
-  KeyRound,
-  Webhook,
-  Ticket,
-  UserCheck,
   Smartphone,
 } from 'lucide-react';
 
@@ -70,6 +64,8 @@ interface OverviewResponse {
   config: {
     campaignName: string;
     entryFee: number;
+    starsAmount: number;
+    displayEntryPrice?: string;
     prizeAnnouncement: string;
     telegramBotTokenConfigured: boolean;
     telegramWebhookSecretConfigured: boolean;
@@ -83,7 +79,7 @@ interface OverviewResponse {
     totalCustomers: number;
     confirmedTickets: number;
     pendingPayments: number;
-    totalRevenueInr: number;
+    totalStarsCollected?: number;
   };
   customers: CustomerRecord[];
   logs: SystemLogEntry[];
@@ -95,7 +91,6 @@ const DEFAULT_SIM_USER_ID = '9199887766';
 export default function App() {
   const [activeTab, setActiveTab] = useState<'simulator' | 'database' | 'webhooks' | 'architecture'>('simulator');
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
-  const [loadingOverview, setLoadingOverview] = useState<boolean>(true);
 
   // Simulator state
   const [simUserId, setSimUserId] = useState<string>(DEFAULT_SIM_USER_ID);
@@ -126,8 +121,6 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to load overview:', err);
-    } finally {
-      setLoadingOverview(false);
     }
   };
 
@@ -138,7 +131,6 @@ export default function App() {
       if (data.ok) {
         setSimCustomer(data.customer);
         setChatHistory(data.chatHistory || []);
-        // If brand new simulator session with no messages yet, send /start automatically
         if (!data.chatHistory || data.chatHistory.length === 0) {
           await dispatchTelegramTextUpdate(userId, '/start');
         }
@@ -157,9 +149,6 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  /**
-   * Sends a real Telegram Update payload to POST /api/telegram/webhook
-   */
   const dispatchTelegramTextUpdate = async (userId: string, text: string) => {
     if (!text.trim()) return;
     setSendingUpdate(true);
@@ -203,31 +192,26 @@ export default function App() {
     }
   };
 
-  /**
-   * Sends a real Telegram callback_query Update payload to POST /api/telegram/webhook
-   */
   const dispatchTelegramCallbackQuery = async (button: InlineKeyboardButton) => {
     setSendingUpdate(true);
     setWebhookStatusBanner(null);
 
     const callbackData = button.callback_data || 'noop';
 
-    // If user clicked the [💰 PAY ₹199] button, dispatch the callback to record the click
-    // AND clearly show that clicking Pay does NOT mark the ticket as PAID until the server webhook arrives.
     try {
       const updatePayload = {
         update_id: Math.floor(Date.now() / 1000) + Math.floor(Math.random() * 1000),
         callback_query: {
           id: `sim_cb_${Date.now()}`,
           from: {
-            id: simUserId,
+            id: userIdOrDefault(simUserId),
             is_bot: false,
             first_name: 'TelegramCustomer',
           },
           message: {
             message_id: Math.floor(Math.random() * 100000),
             chat: {
-              id: simUserId,
+              id: userIdOrDefault(simUserId),
               type: 'private',
             },
             date: Math.floor(Date.now() / 1000),
@@ -254,7 +238,7 @@ export default function App() {
         if (callbackData.startsWith('pay_link_')) {
           setWebhookStatusBanner({
             type: 'info',
-            text: 'Customer tapped [💰 PAY ₹199]. Per security policy, payment_status remains PENDING until the verified server-side Payment Webhook is received. Use the "Fire Verified PAID Webhook" control on the right to complete payment.',
+            text: 'Customer tapped [💰 Pay 100 Telegram Stars ⭐️]. Per security policy, payment_status remains PENDING until Telegram delivers the verified pre_checkout_query (100 XTR) and successful_payment (100 XTR) updates.',
           });
         }
       }
@@ -263,48 +247,105 @@ export default function App() {
     }
   };
 
+  function userIdOrDefault(id: string) {
+    return id || DEFAULT_SIM_USER_ID;
+  }
+
   /**
-   * Triggers a server-side HMAC-SHA256 Payment Webhook for the current payment_id
+   * Simulates the full Telegram Stars native payment flow:
+   * 1. Sends `pre_checkout_query` (currency: "XTR", total_amount: 100)
+   * 2. Sends `message.successful_payment` (currency: "XTR", total_amount: 100)
    */
-  const triggerPaymentWebhook = async (
+  const simulateTelegramStarsPayment = async (
     paymentId: string,
-    status: 'PAID' | 'FAILED',
-    tamperSignature = false
+    currency = 'XTR',
+    totalAmount = 100
   ) => {
     setSendingUpdate(true);
     setWebhookStatusBanner(null);
     try {
-      const res = await fetch('/api/admin/trigger-payment-webhook', {
+      // Step 1: Send pre_checkout_query to /api/telegram/webhook
+      const preCheckoutUpdate = {
+        update_id: Math.floor(Date.now() / 1000) + Math.floor(Math.random() * 1000),
+        pre_checkout_query: {
+          id: `sim_pcq_${Date.now()}`,
+          from: {
+            id: simUserId,
+            is_bot: false,
+            first_name: 'TelegramCustomer',
+          },
+          currency,
+          total_amount: totalAmount,
+          invoice_payload: paymentId,
+        },
+      };
+
+      const pcqRes = await fetch('/api/telegram/webhook', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          payment_id: paymentId,
-          status,
-          amount: 199,
-          tamper_signature: tamperSignature,
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-simulator-internal': 'true',
+        },
+        body: JSON.stringify(preCheckoutUpdate),
+      });
+      const pcqData = await pcqRes.json();
+
+      if (currency !== 'XTR' || totalAmount !== 100) {
+        setWebhookStatusBanner({
+          type: 'error',
+          text: `Rejected pre_checkout_query: currency="${currency}", total_amount=${totalAmount}. Bot strictly requires currency="XTR" and total_amount=100.`,
+        });
+        await fetchOverview();
+        return;
+      }
+
+      if (!pcqRes.ok || !pcqData.ok) {
+        setWebhookStatusBanner({
+          type: 'error',
+          text: pcqData.error || 'pre_checkout_query rejected',
+        });
+        return;
+      }
+
+      // Step 2: Send message.successful_payment to /api/telegram/webhook
+      const chargeId = `st_charge_${paymentId}`;
+      const successfulPaymentUpdate = {
+        update_id: Math.floor(Date.now() / 1000) + Math.floor(Math.random() * 1000) + 1,
+        message: {
+          message_id: Math.floor(Math.random() * 100000),
+          from: {
+            id: simUserId,
+            is_bot: false,
+            first_name: 'TelegramCustomer',
+          },
+          chat: {
+            id: simUserId,
+            type: 'private',
+          },
+          date: Math.floor(Date.now() / 1000),
+          successful_payment: {
+            currency: 'XTR',
+            total_amount: 100,
+            invoice_payload: paymentId,
+            telegram_payment_charge_id: chargeId,
+          },
+        },
+      };
+
+      const spRes = await fetch('/api/telegram/webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-simulator-internal': 'true',
+        },
+        body: JSON.stringify(successfulPaymentUpdate),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        setWebhookStatusBanner({
-          type: 'error',
-          text: data.error || 'Webhook verification failed',
-        });
-      } else if (status === 'FAILED') {
-        setWebhookStatusBanner({
-          type: 'error',
-          text: `Payment Webhook processed with status=FAILED for ${paymentId}. No ticket was generated.`,
-        });
-      } else if (data.already_processed) {
-        setWebhookStatusBanner({
-          type: 'info',
-          text: `Idempotency verified: Duplicate webhook for ${paymentId} ignored. Existing ticket ${data.ticket_number} preserved without duplication.`,
-        });
-      } else {
+      const spData = await spRes.json();
+      if (spData.ok && spData.customer?.ticket_number) {
         setWebhookStatusBanner({
           type: 'success',
-          text: `Verified HMAC-SHA256 Payment Webhook! Generated unique ticket ${data.ticket_number} and sent automatic confirmation to Telegram chat ${simUserId}.`,
+          text: `Verified 100 Telegram Stars ⭐️ (XTR) payment! Ticket ${spData.customer.ticket_number} confirmed for chat ${simUserId}.`,
         });
       }
 
@@ -394,7 +435,7 @@ export default function App() {
                 : 'border-transparent'
             }`}
           >
-            Telegram Simulator & Flow
+            Telegram Simulator &amp; Flow
           </button>
           <button
             onClick={() => setActiveTab('database')}
@@ -404,7 +445,7 @@ export default function App() {
                 : 'border-transparent'
             }`}
           >
-            Customer & Ticket Ledger
+            Customer &amp; Ticket Ledger
           </button>
           <button
             onClick={() => setActiveTab('webhooks')}
@@ -414,7 +455,7 @@ export default function App() {
                 : 'border-transparent'
             }`}
           >
-            Webhook & Security Logs
+            Webhook &amp; Security Logs
           </button>
           <button
             onClick={() => setActiveTab('architecture')}
@@ -424,7 +465,7 @@ export default function App() {
                 : 'border-transparent'
             }`}
           >
-            API & Vercel Deployment
+            API &amp; Vercel Deployment
           </button>
         </nav>
 
@@ -454,7 +495,9 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold text-white">Campaign: DiwaliBigdeal</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums text-amber-400">Entry Fee: ₹199</span>
+            <span className="font-mono tabular-nums text-amber-400">
+              Entry Fee: 100 Telegram Stars ⭐️ (XTR)
+            </span>
             <span aria-hidden="true">·</span>
             <span>Prizes: Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV, Cash Prizes</span>
             <span aria-hidden="true">·</span>
@@ -562,7 +605,11 @@ export default function App() {
                         {!isUser && inlineRows.length > 0 && (
                           <div className="w-[85%] mt-1.5 space-y-1">
                             {inlineRows.map((row, rIdx) => (
-                              <div key={rIdx} className="grid gap-1" style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}>
+                              <div
+                                key={rIdx}
+                                className="grid gap-1"
+                                style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}
+                              >
                                 {row.map((btn, bIdx) => (
                                   <button
                                     key={bIdx}
@@ -594,10 +641,12 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-1.5 mb-2">
                   <button
                     disabled={sendingUpdate}
-                    onClick={() => dispatchTelegramTextUpdate(simUserId, '🎟️ Join ₹199 Entry')}
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '🎟️ Join Entry (100 Telegram Stars ⭐️)')
+                    }
                     className="col-span-2 py-1.5 px-3 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-white rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
-                    🎟️ Join ₹199 Entry
+                    🎟️ Join Entry (100 Telegram Stars ⭐️)
                   </button>
                   <button
                     disabled={sendingUpdate}
@@ -659,9 +708,8 @@ export default function App() {
               </form>
             </div>
 
-            {/* Right Column: State Machine Inspector, Server-Side Payment Webhook Verifier & Quick Fill (7 cols) */}
+            {/* Right Column: State Machine Inspector, Telegram Stars (100 XTR) Verifier & Quick Fill (7 cols) */}
             <div className="lg:col-span-7 space-y-6">
-              {/* Webhook Feedback Alert */}
               {webhookStatusBanner && (
                 <div
                   className={`p-4 rounded-xl border text-xs leading-relaxed flex items-start gap-3 ${
@@ -686,7 +734,7 @@ export default function App() {
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                   <div>
                     <h2 className="text-base font-semibold text-white">
-                      01. Conversation State Machine & Session Persistence
+                      01. Conversation State Machine &amp; Session Persistence
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
                       Persisted in database per <code className="text-slate-200">telegram_user_id</code>. Survives Telegram app restarts.
@@ -799,7 +847,9 @@ export default function App() {
                     </div>
                     <div>
                       <div className="text-slate-500 text-[11px]">payment_amount</div>
-                      <div className="text-slate-100 mt-0.5">₹{simCustomer?.payment_amount ?? 199}</div>
+                      <div className="text-amber-400 mt-0.5">
+                        {simCustomer?.payment_amount ?? 100} Telegram Stars ⭐️
+                      </div>
                     </div>
                     <div className="col-span-2 sm:col-span-3">
                       <div className="text-slate-500 text-[11px]">address</div>
@@ -835,15 +885,15 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 2. Server-Side Payment Webhook Verification & Ticket Issuing Console */}
+              {/* 2. Server-Side Telegram Stars (100 XTR) Verification Console */}
               <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-5">
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div>
                     <h2 className="text-base font-semibold text-white">
-                      02. Server-Side Payment Webhook Verifier (HMAC-SHA256)
+                      02. Telegram Stars (100 XTR) Pre-Checkout &amp; Payment Verifier
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Clicking <strong className="text-slate-200">[💰 PAY ₹199]</strong> never marks an entry as paid. A confirmed ticket (<code className="text-emerald-400">DB2026-XXXXXX</code>) is generated strictly when <code className="text-slate-200">POST /api/payment/webhook</code> receives a cryptographically signed <code className="text-emerald-400">PAID</code> event.
+                      Invoices use <code className="text-amber-400">currency: &quot;XTR&quot;</code> and <code className="text-amber-400">prices: [{'{'}&quot;label&quot;:&quot;DiwaliBigdeal Entry&quot;,&quot;amount&quot;:100{'}'}]</code>. Tickets (<code className="text-emerald-400">DB2026-XXXXXX</code>) are generated strictly after verifying <code className="text-slate-200">pre_checkout_query</code> and <code className="text-slate-200">successful_payment</code> with <code className="text-emerald-400">currency === &quot;XTR&quot;</code> and <code className="text-emerald-400">total_amount === 100</code>.
                     </p>
                   </div>
                 </div>
@@ -852,7 +902,7 @@ export default function App() {
                   <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
                       <div>
-                        <span className="text-slate-400">Active Payment ID: </span>
+                        <span className="text-slate-400">Invoice Payload: </span>
                         <strong className="text-sky-400">{simCustomer.payment_id}</strong>
                       </div>
                       <div>
@@ -872,7 +922,7 @@ export default function App() {
                       <div>
                         <span className="text-slate-400">Ticket Assigned: </span>
                         <strong className="text-emerald-400">
-                          {simCustomer.ticket_number || 'NONE (Awaiting Webhook)'}
+                          {simCustomer.ticket_number || 'NONE (Awaiting 100 XTR Payment)'}
                         </strong>
                       </div>
                     </div>
@@ -880,27 +930,27 @@ export default function App() {
                     <div className="flex flex-wrap items-center gap-2.5">
                       <button
                         disabled={sendingUpdate}
-                        onClick={() => triggerPaymentWebhook(simCustomer.payment_id!, 'PAID', false)}
+                        onClick={() => simulateTelegramStarsPayment(simCustomer.payment_id!, 'XTR', 100)}
                         className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5"
                       >
                         <ShieldCheck className="w-4 h-4" />
-                        Fire Verified PAID Webhook (₹199)
+                        Simulate Verified 100 Telegram Stars ⭐️ Payment (XTR)
                       </button>
 
                       <button
                         disabled={sendingUpdate}
-                        onClick={() => triggerPaymentWebhook(simCustomer.payment_id!, 'FAILED', false)}
+                        onClick={() => simulateTelegramStarsPayment(simCustomer.payment_id!, 'XTR', 50)}
                         className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
                       >
-                        Simulate FAILED Payment Webhook
+                        Test Wrong Amount (50 XTR → Reject)
                       </button>
 
                       <button
                         disabled={sendingUpdate}
-                        onClick={() => triggerPaymentWebhook(simCustomer.payment_id!, 'PAID', true)}
+                        onClick={() => simulateTelegramStarsPayment(simCustomer.payment_id!, 'USD', 100)}
                         className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-red-300 border border-slate-700 text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
                       >
-                        Test Invalid HMAC Signature (401)
+                        Test Wrong Currency (USD → Reject)
                       </button>
                     </div>
                   </div>
@@ -908,7 +958,10 @@ export default function App() {
                   <div className="bg-slate-900/60 border border-slate-800 rounded-lg p-4 text-xs text-slate-400 flex items-center justify-between">
                     <span>
                       Complete Step 1–3 (Name, Mobile Number, Address) and tap{' '}
-                      <strong className="text-slate-200">✅ Confirm &amp; Pay ₹199</strong> in the Telegram simulator to generate a payment order.
+                      <strong className="text-slate-200">
+                        ✅ Confirm &amp; Pay 100 Telegram Stars ⭐️
+                      </strong>{' '}
+                      in the Telegram simulator to generate a 100 XTR invoice.
                     </span>
                   </div>
                 )}
@@ -917,19 +970,19 @@ export default function App() {
               {/* 3. Flow Invariants & Zero-Cancel Guarantee */}
               <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-5">
                 <h2 className="text-base font-semibold text-white mb-2">
-                  03. Enforced Production Invariants
+                  03. Enforced Telegram Stars (100 XTR) Invariants
                 </h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-300">
                   <div className="p-3 bg-slate-900/70 border border-slate-800 rounded-lg">
-                    <div className="font-semibold text-white mb-1">Zero Cancel Buttons in Flow</div>
+                    <div className="font-semibold text-white mb-1">Exact 100 XTR Invoice Specification</div>
                     <p className="text-slate-400 leading-relaxed">
-                      Confirmation shows strictly <code className="text-slate-200">✅ Confirm &amp; Pay ₹199</code> and <code className="text-slate-200">✏️ Edit Details</code>. Payment step shows strictly <code className="text-slate-200">[💰 PAY ₹199]</code> with no Cancel option.
+                      Every invoice sets <code className="text-amber-400">currency: &quot;XTR&quot;</code> and <code className="text-amber-400">prices: [{'{'}&quot;label&quot;:&quot;DiwaliBigdeal Entry&quot;,&quot;amount&quot;:100{'}'}]</code> with no Cancel button.
                     </p>
                   </div>
                   <div className="p-3 bg-slate-900/70 border border-slate-800 rounded-lg">
                     <div className="font-semibold text-white mb-1">Idempotent Unique Ticket Numbers</div>
                     <p className="text-slate-400 leading-relaxed">
-                      Tickets follow <code className="text-emerald-400">DB2026-000001</code> sequential formatting. Replay or duplicate payment webhooks return the existing ticket without duplicating.
+                      Tickets follow <code className="text-emerald-400">DB2026-000001</code> sequential formatting and prevent duplicate issuance across repeated <code className="text-slate-200">successful_payment</code> updates.
                     </p>
                   </div>
                 </div>
@@ -989,7 +1042,7 @@ export default function App() {
                       <th className="py-3 px-4">conversation_state</th>
                       <th className="py-3 px-4">payment_id</th>
                       <th className="py-3 px-4">payment_status</th>
-                      <th className="py-3 px-4 text-right">amount</th>
+                      <th className="py-3 px-4 text-right">stars_amount</th>
                       <th className="py-3 px-4">ticket_number</th>
                       <th className="py-3 px-4 text-right">updated_at</th>
                       <th className="py-3 px-4 text-right">Action</th>
@@ -1028,7 +1081,9 @@ export default function App() {
                               {cust.payment_status}
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-right text-slate-200">₹{cust.payment_amount}</td>
+                          <td className="py-3 px-4 text-right text-amber-300">
+                            {cust.payment_amount} ⭐️
+                          </td>
                           <td className="py-3 px-4 text-emerald-400 font-semibold">
                             {cust.ticket_number || '—'}
                           </td>
@@ -1087,10 +1142,10 @@ export default function App() {
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-lg font-semibold text-white">
-                  Server-Side Audit &amp; Webhook Verification Logs
+                  Server-Side Audit &amp; Telegram Stars Verification Logs
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Real-time structured event log capturing Telegram webhook updates, state transitions, HMAC signature checks, and atomic ticket issuance.
+                  Real-time structured event log capturing Telegram webhook updates, state transitions, 100 XTR pre-checkout validations, and atomic ticket issuance.
                 </p>
               </div>
               <button
@@ -1146,7 +1201,7 @@ export default function App() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6 space-y-4">
               <h2 className="text-base font-semibold text-white">
-                01. Production Backend Endpoints (GitHub &amp; Vercel Ready)
+                01. Production Backend Endpoints (100 Telegram Stars ⭐️)
               </h2>
               <div className="space-y-3 text-xs">
                 <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-lg">
@@ -1154,25 +1209,16 @@ export default function App() {
                     POST /api/telegram/webhook
                   </div>
                   <p className="text-slate-400 mt-1 leading-relaxed">
-                    Receives incoming Telegram Bot API <code className="text-slate-200">Update</code> payloads (<code className="text-slate-200">message</code> and <code className="text-slate-200">callback_query</code>). Validates <code className="text-slate-200">X-Telegram-Bot-Api-Secret-Token</code> header and routes user input through the persistent state machine.
+                    Receives Telegram Bot API <code className="text-slate-200">Update</code> payloads (<code className="text-slate-200">message</code>, <code className="text-slate-200">callback_query</code>, <code className="text-slate-200">pre_checkout_query</code>, and <code className="text-slate-200">successful_payment</code>). Validates <code className="text-amber-400">currency === &quot;XTR&quot;</code> and <code className="text-amber-400">total_amount === 100</code>.
                   </p>
                 </div>
 
                 <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-lg">
                   <div className="font-mono font-semibold text-sky-400">
-                    POST /api/payment/create
+                    Invoice Payload Specification
                   </div>
                   <p className="text-slate-400 mt-1 leading-relaxed">
-                    Creates a ₹199 payment order linked to the customer&apos;s <code className="text-slate-200">telegram_user_id</code> and sets <code className="text-slate-200">payment_status = PENDING</code>. Never marks the entry as paid on creation.
-                  </p>
-                </div>
-
-                <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-lg">
-                  <div className="font-mono font-semibold text-amber-400">
-                    POST /api/payment/webhook
-                  </div>
-                  <p className="text-slate-400 mt-1 leading-relaxed">
-                    Verifies the payment provider&apos;s cryptographic <code className="text-slate-200">HMAC-SHA256</code> signature (<code className="text-slate-200">X-Razorpay-Signature</code> / <code className="text-slate-200">X-Payment-Webhook-Signature</code>). Only after verified <code className="text-slate-200">PAID</code> status: sets <code className="text-slate-200">payment_status = PAID</code>, generates a unique <code className="text-emerald-400">DB2026-XXXXXX</code> ticket (idempotent against duplicate webhooks), and sends the automatic confirmation message to the user&apos;s Telegram chat.
+                    Every Telegram Stars invoice uses <code className="text-slate-200">currency: &quot;XTR&quot;</code>, <code className="text-slate-200">provider_token: &quot;&quot;</code>, and <code className="text-amber-400">prices: [{'{'}&quot;label&quot;:&quot;DiwaliBigdeal Entry&quot;,&quot;amount&quot;:100{'}'}]</code>.
                   </p>
                 </div>
               </div>
@@ -1183,7 +1229,7 @@ export default function App() {
                 02. Telegram Webhook Registration Command
               </h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                After deploying to Vercel or your production host and setting your environment variables (<code className="text-slate-200">.env.example</code>), register your Telegram Bot webhook with a single cURL command:
+                Register your Telegram Bot webhook with <code className="text-slate-200">pre_checkout_query</code> enabled:
               </p>
 
               <pre className="bg-slate-950 border border-slate-800 rounded-lg p-4 text-xs font-mono text-slate-300 overflow-x-auto leading-relaxed">
@@ -1207,16 +1253,16 @@ export default function App() {
                     </span>
                   </div>
                   <div className="p-2.5 bg-slate-900 rounded border border-slate-800 flex items-center justify-between">
-                    <span className="text-slate-400">WEBHOOK_SECRET</span>
-                    <span className="text-emerald-400">ACTIVE</span>
+                    <span className="text-slate-400">CURRENCY</span>
+                    <span className="text-amber-400">XTR</span>
                   </div>
                   <div className="p-2.5 bg-slate-900 rounded border border-slate-800 flex items-center justify-between">
                     <span className="text-slate-400">PAYMENT_PROVIDER</span>
-                    <span className="text-sky-400 uppercase">{overview?.config.paymentProvider || 'TELEGRAM_STARS'}</span>
+                    <span className="text-sky-400 uppercase">TELEGRAM_STARS</span>
                   </div>
                   <div className="p-2.5 bg-slate-900 rounded border border-slate-800 flex items-center justify-between">
-                    <span className="text-slate-400">CAMPAIGN_ENTRY_FEE</span>
-                    <span className="text-emerald-400">₹{overview?.config.entryFee ?? 199}</span>
+                    <span className="text-slate-400">STARS_AMOUNT</span>
+                    <span className="text-emerald-400">100 Telegram Stars ⭐️</span>
                   </div>
                 </div>
               </div>

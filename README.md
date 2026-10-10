@@ -1,20 +1,21 @@
 # DiwaliBigdeal — Production Telegram Bot Backend
 
-A Telegram-first campaign bot backend for **DiwaliBigdeal** (₹199 Entry) with persistent conversation state machine, server-side payment webhook verification (`HMAC-SHA256`), and atomic unique ticket generation (`DB2026-000001`).
+A Telegram-first campaign bot backend for **DiwaliBigdeal** (`100 Telegram Stars ⭐️` / `XTR` Entry) with persistent conversation state machine, server-side Telegram Stars (`pre_checkout_query` & `successful_payment`) validation, and atomic unique ticket generation (`DB2026-000001`).
 
 ## Features
 
 - **Telegram-First Customer Flow**:
-  - Main Menu: `🎟️ Join ₹199 Entry`, `🎫 My Ticket`, `🏆 Prize Details`, `🆘 Support`
-  - Step-by-step registration: Full Name → Mobile Number (validated) → Complete Address → Confirmation (`✅ Confirm & Pay ₹199` / `✏️ Edit Details`) → Payment (`💰 PAY ₹199`)
+  - Main Menu: `🎟️ Join Entry (100 Telegram Stars ⭐️)`, `🎫 My Ticket`, `🏆 Prize Details`, `🆘 Support`
+  - Step-by-step registration: Full Name → Mobile Number (validated) → Complete Address → Confirmation (`✅ Confirm & Pay 100 Telegram Stars ⭐️` / `✏️ Edit Details`) → Payment (`💰 Pay 100 Telegram Stars ⭐️`)
   - **Zero Cancel Buttons**: No cancel buttons appear in the confirmation or payment flow.
 - **Persistent State Machine**:
   - States: `idle`, `waiting_for_name`, `waiting_for_phone`, `waiting_for_address`, `waiting_for_confirmation`, `waiting_for_payment`, `completed`.
   - Remembers customer progress across sessions by `telegram_user_id`.
-- **Cryptographic Payment Webhook Verification**:
-  - Clicking `💰 PAY ₹199` never marks an entry as paid.
-  - `POST /api/payment/webhook` validates the `HMAC-SHA256` signature using `PAYMENT_WEBHOOK_SECRET`.
-  - Only after a verified `PAID` webhook is received does the system mark `payment_status = PAID`, generate a unique ticket (`DB2026-000001`), and send the automatic confirmation message to the user's Telegram chat.
+- **Telegram Stars (`XTR`) Payment Verification**:
+  - Every invoice uses `currency: "XTR"`, `provider_token: ""`, and `prices: [{"label":"DiwaliBigdeal Entry","amount":100}]`.
+  - Clicking `💰 Pay 100 Telegram Stars ⭐️` never marks an entry as paid.
+  - Handles `pre_checkout_query` and validates `currency === "XTR"` and `total_amount === 100`.
+  - Only after receiving a verified `successful_payment` (`currency === "XTR"`, `total_amount === 100`) does the system mark `payment_status = PAID`, generate a unique ticket (`DB2026-XXXXXX`), prevent duplicate tickets for the same payment, and send the automatic confirmation message to the user's Telegram chat.
 
 ## Environment Variables
 
@@ -26,13 +27,11 @@ cp .env.example .env
 
 Required variables:
 - `TELEGRAM_BOT_TOKEN`: Telegram Bot token from `@BotFather`
-- `TELEGRAM_WEBHOOK_SECRET`: Secret token for `X-Telegram-Bot-Api-Secret-Token` validation
-- `PAYMENT_PROVIDER`: `razorpay` (default)
-- `PAYMENT_KEY_ID`: Payment gateway API key ID
-- `PAYMENT_KEY_SECRET`: Payment gateway API key secret
-- `PAYMENT_WEBHOOK_SECRET`: Webhook secret for HMAC-SHA256 verification
-- `CAMPAIGN_ENTRY_FEE`: `199`
-- `APP_URL`: Deployed application URL
+- `TELEGRAM_WEBHOOK_SECRET`: Optional secret token for `X-Telegram-Bot-Api-Secret-Token` validation
+- `PAYMENT_PROVIDER`: `telegram_stars`
+- `TELEGRAM_STARS_AMOUNT`: `100`
+- `CAMPAIGN_ENTRY_FEE`: `100`
+- `APP_URL`: Deployed application URL (`https://100197-oqqb.vercel.app`)
 
 ## Running Locally
 
@@ -43,17 +42,15 @@ npm run dev
 
 ## Deploying to Vercel
 
-1. Push this repository to GitHub.
-2. Import the repository into Vercel.
-3. Configure the environment variables from `.env.example` in Vercel Settings.
-4. Register the Telegram webhook:
+1. Push this repository to GitHub (`main` branch).
+2. Vercel builds and deploys `/api/telegram/webhook.js`, `/api/health.js`, and `/api/index.js`.
+3. Register the Telegram webhook (including `pre_checkout_query` for Telegram Stars):
 
 ```bash
 curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://<YOUR_VERCEL_DOMAIN>/api/telegram/webhook",
-    "secret_token": "<TELEGRAM_WEBHOOK_SECRET>",
-    "allowed_updates": ["message", "callback_query"]
+    "url": "https://100197-oqqb.vercel.app/api/telegram/webhook",
+    "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
   }'
 ```
