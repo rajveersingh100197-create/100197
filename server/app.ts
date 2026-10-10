@@ -33,6 +33,27 @@ app.use(
 );
 
 // ============================================================================
+// 0. STATELESS HEALTH-CHECK ENDPOINT (No Telegram Secrets or Database Required)
+// GET /api/health
+// ============================================================================
+app.get('/api/health', (_req: Request, res: Response) => {
+  const status = getPublicConfigStatus();
+  return res.status(200).json({
+    ok: true,
+    status: 'HEALTHY',
+    endpoint: '/api/health',
+    service: 'DiwaliBigdeal Telegram Bot Backend',
+    runtime: process.env.VERCEL ? 'vercel-serverless' : 'node',
+    payment_mode: 'telegram_stars (XTR)',
+    entry_fee_inr: status.entryFee,
+    stars_amount: status.starsAmount,
+    telegram_bot_token_configured: status.telegramBotTokenConfigured,
+    telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ============================================================================
 // 1. PRODUCTION TELEGRAM WEBHOOK ENDPOINT
 // POST /api/telegram/webhook
 // GET  /api/telegram/webhook (Diagnostic Health Response)
