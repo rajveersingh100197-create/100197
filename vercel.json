@@ -3,11 +3,19 @@
   "rewrites": [
     {
       "source": "/api/health",
-      "destination": "/api/health"
+      "destination": "/api/health.js"
+    },
+    {
+      "source": "/api/telegram/webhook",
+      "destination": "/api/telegram/webhook.js"
+    },
+    {
+      "source": "/api/payment/webhook",
+      "destination": "/api/payment/webhook.js"
     },
     {
       "source": "/api/(.*)",
-      "destination": "/api/index"
+      "destination": "/api/index.js"
     }
   ]
 }

@@ -5,8 +5,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
-    "build:api": "esbuild server/vercelHandler.ts --bundle --platform=node --target=node20 --format=cjs --outfile=api/index.js",
-    "build": "npm run build:api && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
