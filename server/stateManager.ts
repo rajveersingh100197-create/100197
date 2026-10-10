@@ -4,20 +4,26 @@
  */
 
 import crypto from 'crypto';
-import { db } from './db.js';
-import { logger } from './logger.js';
+import { db } from './db';
+import { logger } from './logger';
 import {
   ConversationState,
   CustomerRecord,
   PaymentStatus,
   TelegramUpdate,
-} from './types.js';
+} from './types';
 import {
   answerTelegramCallbackQuery,
+  answerTelegramPreCheckoutQuery,
   MAIN_MENU_INLINE_KEYBOARD,
   sendTelegramMessage,
-} from './telegramService.js';
-import { createPaymentOrderForCustomer } from './paymentService.js';
+  sendTelegramStarsInvoice,
+} from './telegramService';
+import {
+  createPaymentOrderForCustomer,
+  processVerifiedPaymentWebhook,
+} from './paymentService';
+import { CONFIG } from './config';
 
 /**
  * Conversation & State Machine Manager for "DiwaliBigdeal"
@@ -32,6 +38,7 @@ import { createPaymentOrderForCustomer } from './paymentService.js';
  *   waiting_for_payment
  *   completed
  *
+ * - Supports native Telegram Stars (`pre_checkout_query` & `message.successful_payment`).
  * - Zero Cancel buttons in confirmation or payment flow.
  * - Remembers customer's current state across sessions.
  */
@@ -40,9 +47,7 @@ export function validateIndianMobileNumber(input: string): {
   valid: boolean;
   normalized: string;
 } {
-  // Strip spaces, dashes, parentheses
   const cleaned = input.replace(/[\s\-()]/g, '');
-  // Accept optional +91 or 91 or 0 prefix followed by 10 digits starting with 6-9
   const match = cleaned.match(/^(?:\+?91|0)?([6-9]\d{9})$/);
   if (!match) {
     return { valid: false, normalized: input.trim() };
@@ -50,9 +55,6 @@ export function validateIndianMobileNumber(input: string): {
   return { valid: true, normalized: match[1] };
 }
 
-/**
- *Exact message templates from user specification
- */
 export const BOT_MESSAGES = {
   mainMenuGreeting: () =>
     [
@@ -166,7 +168,6 @@ async function sendConfirmationScreen(customer: CustomerRecord) {
     customer.address || ''
   );
 
-  // Notice: Strictly NO Cancel button
   await sendTelegramMessage(customer.telegram_chat_id, text, {
     inline_keyboard: [
       [{ text: '✅ Confirm & Pay ₹199', callback_data: 'action_confirm_pay_199' }],
@@ -179,30 +180,34 @@ async function sendConfirmationScreen(customer: CustomerRecord) {
  * Sends the Payment Screen with ONLY:
  * - [💰 PAY ₹199]
  * (NO Cancel button)
+ *
+ * Uses a native Telegram Stars invoice URL (`t.me/$...`) when created via `createInvoiceLink`,
+ * or triggers `sendInvoice` via callback `pay_link_<payment_id>` if `createInvoiceLink` was not available.
  */
 async function sendPaymentScreen(customer: CustomerRecord) {
   const paymentOrder = await createPaymentOrderForCustomer(customer);
   const text = BOT_MESSAGES.paymentPrompt();
 
-  // Strictly NO Cancel button after Pay Now/payment step.
+  const isNativeTelegramStarsLink = paymentOrder.payment_url.startsWith('https://t.me/$');
+
   await sendTelegramMessage(customer.telegram_chat_id, text, {
     inline_keyboard: [
       [
-        {
-          text: '💰 PAY ₹199',
-          url: paymentOrder.payment_url,
-          callback_data: `pay_link_${paymentOrder.payment_id}`,
-        },
+        isNativeTelegramStarsLink
+          ? {
+              text: '💰 PAY ₹199',
+              url: paymentOrder.payment_url,
+            }
+          : {
+              text: '💰 PAY ₹199',
+              callback_data: `pay_link_${paymentOrder.payment_id}`,
+            },
       ],
     ],
   });
 }
 
-/**
- * Handles the "🎟️ Join ₹199 Entry" trigger
- */
 async function handleJoinEntryTrigger(customer: CustomerRecord) {
-  // If customer already has a confirmed paid ticket, show their ticket or allow viewing
   if (customer.payment_status === PaymentStatus.PAID && customer.ticket_number) {
     await handleMyTicketTrigger(customer);
     return;
@@ -213,9 +218,6 @@ async function handleJoinEntryTrigger(customer: CustomerRecord) {
   });
 }
 
-/**
- * Handles the "🎫 My Ticket" trigger
- */
 async function handleMyTicketTrigger(customer: CustomerRecord) {
   if (customer.payment_status === PaymentStatus.PAID && customer.ticket_number) {
     await sendTelegramMessage(
@@ -234,9 +236,6 @@ async function handleMyTicketTrigger(customer: CustomerRecord) {
   }
 }
 
-/**
- * Handles the "🏆 Prize Details" trigger
- */
 async function handlePrizeDetailsTrigger(customer: CustomerRecord) {
   await sendTelegramMessage(
     customer.telegram_chat_id,
@@ -245,9 +244,6 @@ async function handlePrizeDetailsTrigger(customer: CustomerRecord) {
   );
 }
 
-/**
- * Handles the "🆘 Support" trigger
- */
 async function handleSupportTrigger(customer: CustomerRecord) {
   await sendTelegramMessage(
     customer.telegram_chat_id,
@@ -257,17 +253,73 @@ async function handleSupportTrigger(customer: CustomerRecord) {
 }
 
 /**
- * Main entry point for processing any incoming Telegram Update (`message` or `callback_query`).
+ * Main entry point for processing any incoming Telegram Update:
+ * - `pre_checkout_query` (Telegram Stars pre-checkout verification)
+ * - `message.successful_payment` (Telegram Stars verified payment confirmation)
+ * - `callback_query` (Inline keyboard button taps)
+ * - `message.text` (Standard text messages & commands)
  */
 export async function handleTelegramUpdate(update: TelegramUpdate): Promise<CustomerRecord | null> {
-  // 1. Handle Inline Keyboard Callback Queries
+  // 0. Handle Telegram Stars `pre_checkout_query`
+  if (update.pre_checkout_query) {
+    const pcq = update.pre_checkout_query;
+    const paymentId = pcq.invoice_payload;
+    const customer = db.getCustomerByPaymentId(paymentId);
+
+    if (!customer) {
+      logger.warn('TelegramStars', `Rejected pre_checkout_query: unknown payload ${paymentId}`);
+      await answerTelegramPreCheckoutQuery(
+        pcq.id,
+        false,
+        'Payment session expired or not found. Please tap Confirm & Pay ₹199 again.'
+      );
+      return null;
+    }
+
+    logger.info('TelegramStars', `Approved pre_checkout_query for ${paymentId}`, {
+      telegram_user_id: customer.telegram_user_id,
+      currency: pcq.currency,
+      total_amount: pcq.total_amount,
+    });
+    await answerTelegramPreCheckoutQuery(pcq.id, true);
+    return customer;
+  }
+
+  // 1. Handle Telegram Stars `message.successful_payment`
+  if (update.message?.successful_payment) {
+    const msg = update.message;
+    const sp = msg.successful_payment!;
+    const userId = String(msg.from?.id || msg.chat.id);
+    const chatId = String(msg.chat.id);
+    const paymentId = sp.invoice_payload;
+
+    db.getOrCreateCustomer(userId, chatId);
+
+    logger.webhook('TelegramStars', `Received verified successful_payment from Telegram`, {
+      telegram_user_id: userId,
+      payment_id: paymentId,
+      currency: sp.currency,
+      total_amount: sp.total_amount,
+      charge_id: sp.telegram_payment_charge_id,
+    });
+
+    const result = await processVerifiedPaymentWebhook({
+      paymentId,
+      eventStatus: 'PAID',
+      amountInRupees: CONFIG.CAMPAIGN_ENTRY_FEE,
+      telegramPaymentChargeId: sp.telegram_payment_charge_id,
+    });
+
+    return result.customer;
+  }
+
+  // 2. Handle Inline Keyboard Callback Queries
   if (update.callback_query) {
     const cb = update.callback_query;
     const userId = String(cb.from.id);
     const chatId = String(cb.message?.chat.id || cb.from.id);
     const data = (cb.data || '').trim();
 
-    // Record user button tap in chat transcript for clear visibility
     const buttonLabelMap: Record<string, string> = {
       menu_join_199: '🎟️ Join ₹199 Entry',
       action_continue_join: '🚀 Continue',
@@ -308,7 +360,6 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     }
 
     if (data === 'action_edit_details') {
-      // Allow customer to update their information and then show confirmation screen again
       customer = db.updateCustomer(userId, {
         conversation_state: ConversationState.WAITING_FOR_NAME,
       });
@@ -331,10 +382,12 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
 
     if (data.startsWith('pay_link_')) {
       // IMPORTANT: Do NOT mark the entry as paid merely because the customer clicked the payment button.
+      const paymentId = data.replace('pay_link_', '');
       logger.info(
         'StateManager',
-        `Customer ${userId} clicked Pay button (${data}). Waiting for verified server-side payment webhook.`
+        `Customer ${userId} clicked Pay button (${paymentId}). Dispatching Telegram Stars invoice if live token configured; awaiting verified payment.`
       );
+      await sendTelegramStarsInvoice(chatId, paymentId, CONFIG.TELEGRAM_STARS_AMOUNT);
       return db.getCustomerByUserId(userId);
     }
 
@@ -356,7 +409,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     return customer;
   }
 
-  // 2. Handle Standard Text Messages
+  // 3. Handle Standard Text Messages
   if (update.message && typeof update.message.text === 'string') {
     const msg = update.message;
     const userId = String(msg.from?.id || msg.chat.id);
@@ -376,9 +429,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       text,
     });
 
-    // Global Menu / Command Triggers
-    if (text === '/start' || text === '/menu' || text.toLowerCase() === 'menu' || text.toLowerCase() === 'hi' || text.toLowerCase() === 'hello') {
-      // Note: Do not wipe customer's saved progress; show main menu buttons.
+    if (
+      text === '/start' ||
+      text === '/menu' ||
+      text.toLowerCase() === 'menu' ||
+      text.toLowerCase() === 'hi' ||
+      text.toLowerCase() === 'hello'
+    ) {
       await sendTelegramMessage(
         chatId,
         BOT_MESSAGES.mainMenuGreeting(),
@@ -407,7 +464,6 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       return customer;
     }
 
-    // Handle State Machine Transitions
     switch (customer.conversation_state) {
       case ConversationState.WAITING_FOR_NAME: {
         if (text.length < 2) {
@@ -450,13 +506,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       }
 
       case ConversationState.WAITING_FOR_CONFIRMATION: {
-        // Re-display confirmation screen if customer sends free text while in waiting_for_confirmation
         await sendConfirmationScreen(customer);
         return customer;
       }
 
       case ConversationState.WAITING_FOR_PAYMENT: {
-        // Re-display payment screen (without Cancel button) if customer returns and messages the bot
         await sendPaymentScreen(customer);
         return db.getCustomerByUserId(userId);
       }

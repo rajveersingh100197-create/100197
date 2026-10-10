@@ -3,10 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import app from '../server.js';
+import { app } from '../server/app';
 
 /**
- * Vercel Serverless Function Entry Point
- * Routes all /api/* requests to the production Express backend.
+ * Vercel Serverless Function Entry Point (Catch-all for /api/*)
  */
 export default app;

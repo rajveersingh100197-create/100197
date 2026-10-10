@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SystemLogEntry } from './types.js';
+import { SystemLogEntry } from './types';
 import crypto from 'crypto';
 
 const MAX_LOGS = 250;

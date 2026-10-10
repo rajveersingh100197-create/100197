@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { db } from './db.js';
-import { ConversationState, CustomerRecord, PaymentStatus } from './types.js';
-import { logger } from './logger.js';
+import { db } from './db';
+import { ConversationState, CustomerRecord, PaymentStatus } from './types';
+import { logger } from './logger';
 
 /**
  * Ticket Generator Service

@@ -5,9 +5,9 @@
 
 import fs from 'fs';
 import path from 'path';
-import { ConversationState, CustomerRecord, OutgoingBotMessage, PaymentStatus } from './types.js';
-import { CONFIG } from './config.js';
-import { logger } from './logger.js';
+import { ConversationState, CustomerRecord, OutgoingBotMessage, PaymentStatus } from './types';
+import { CONFIG } from './config';
+import { logger } from './logger';
 
 /**
  * Production-ready Database Layer with automatic SQLite (node:sqlite) + JSON fallback
@@ -35,7 +35,10 @@ interface DatabaseStorageSnapshot {
   chatHistories: Record<string, OutgoingBotMessage[]>;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR =
+  process.env.VERCEL === '1'
+    ? '/tmp/diwalibigdeal'
+    : path.resolve(process.cwd(), 'data');
 const JSON_DB_FILE = path.join(DATA_DIR, 'diwalibigdeal_store.json');
 
 class DatabaseManager {

@@ -39,6 +39,7 @@ export interface InlineKeyboardButton {
   text: string;
   callback_data?: string;
   url?: string;
+  pay?: boolean;
 }
 
 export interface InlineKeyboardMarkup {
@@ -71,12 +72,29 @@ export interface TelegramChat {
   username?: string;
 }
 
+export interface TelegramSuccessfulPayment {
+  currency: string; // 'XTR' for Telegram Stars
+  total_amount: number;
+  invoice_payload: string;
+  telegram_payment_charge_id: string;
+  provider_payment_charge_id?: string;
+}
+
+export interface TelegramPreCheckoutQuery {
+  id: string;
+  from: TelegramUser;
+  currency: string; // 'XTR' for Telegram Stars
+  total_amount: number;
+  invoice_payload: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   date: number;
   text?: string;
+  successful_payment?: TelegramSuccessfulPayment;
 }
 
 export interface TelegramCallbackQuery {
@@ -90,6 +108,7 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
+  pre_checkout_query?: TelegramPreCheckoutQuery;
 }
 
 export interface OutgoingBotMessage {
@@ -113,6 +132,7 @@ export interface SystemLogEntry {
 export interface PaymentCreationResult {
   payment_id: string;
   payment_amount: number;
+  stars_amount: number;
   payment_url: string;
   provider: string;
   status: PaymentStatus;

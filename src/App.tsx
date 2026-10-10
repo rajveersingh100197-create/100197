@@ -1190,9 +1190,8 @@ export default function App() {
 {`curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "url": "${overview?.config.appUrl || 'https://your-domain.vercel.app'}/api/telegram/webhook",
-    "secret_token": "<TELEGRAM_WEBHOOK_SECRET>",
-    "allowed_updates": ["message", "callback_query"]
+    "url": "https://100197-oqqb.vercel.app/api/telegram/webhook",
+    "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
   }'`}
               </pre>
 
@@ -1213,7 +1212,7 @@ export default function App() {
                   </div>
                   <div className="p-2.5 bg-slate-900 rounded border border-slate-800 flex items-center justify-between">
                     <span className="text-slate-400">PAYMENT_PROVIDER</span>
-                    <span className="text-sky-400 uppercase">{overview?.config.paymentProvider || 'RAZORPAY'}</span>
+                    <span className="text-sky-400 uppercase">{overview?.config.paymentProvider || 'TELEGRAM_STARS'}</span>
                   </div>
                   <div className="p-2.5 bg-slate-900 rounded border border-slate-800 flex items-center justify-between">
                     <span className="text-slate-400">CAMPAIGN_ENTRY_FEE</span>
