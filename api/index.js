@@ -10,18 +10,23 @@ const crypto = require('crypto');
 // ============================================================================
 // 1. CONFIGURATION & ENVIRONMENT VARIABLES (100 Telegram Stars ⭐️ / XTR)
 // ============================================================================
+const PRODUCTION_WEBHOOK_URL = 'https://100197-oqqb.vercel.app/api/telegram/webhook';
+
 function getConfig() {
+  const rawAppUrl = (process.env.APP_URL || 'https://100197-oqqb.vercel.app').trim();
+  const normalizedAppUrl = rawAppUrl.replace(/\/+$/, '');
   return {
-    APP_URL: process.env.APP_URL || 'https://100197-oqqb.vercel.app',
+    APP_URL: normalizedAppUrl,
+    PRODUCTION_WEBHOOK_URL,
     CAMPAIGN_NAME: 'DiwaliBigdeal',
     CAMPAIGN_ENTRY_FEE: 100,
     TELEGRAM_STARS_AMOUNT: 100,
     DISPLAY_ENTRY_PRICE: '100 Telegram Stars ⭐️',
     PRIZE_ANNOUNCEMENT_DATE: '8 November 2026',
     PRIZE_ANNOUNCEMENT_TIME: '11:59 PM IST',
-    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
-    TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET || '',
-    PAYMENT_WEBHOOK_SECRET: process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026',
+    TELEGRAM_BOT_TOKEN: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+    TELEGRAM_WEBHOOK_SECRET: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
+    PAYMENT_WEBHOOK_SECRET: (process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026').trim(),
     DATABASE_PATH: process.env.DATABASE_PATH || '/tmp/diwalibigdeal/diwalibigdeal_store.json',
   };
 }
@@ -47,11 +52,12 @@ function getPublicConfigStatus() {
     paymentWebhookSecretConfigured: Boolean(cfg.PAYMENT_WEBHOOK_SECRET),
     databasePath: cfg.DATABASE_PATH,
     appUrl: cfg.APP_URL,
+    expectedWebhookUrl: cfg.PRODUCTION_WEBHOOK_URL,
   };
 }
 
 // ============================================================================
-// 2. STRUCTURED LOGGER (NO SECRETS EXPOSED)
+// 2. STRUCTURED LOGGER (NO SECRETS OR SENSITIVE CUSTOMER DATA EXPOSED)
 // ============================================================================
 const MAX_LOGS = 200;
 const logs = [];
@@ -353,19 +359,192 @@ const MAIN_MENU_INLINE_KEYBOARD = {
   ],
 };
 
+function sanitizeSecretToken(raw) {
+  return String(raw || '')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, '');
+}
+
 function verifyTelegramWebhookSecret(headerToken) {
-  const secret = getConfig().TELEGRAM_WEBHOOK_SECRET;
+  const secret = sanitizeSecretToken(getConfig().TELEGRAM_WEBHOOK_SECRET);
   if (!secret || secret === 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
-    return true;
+    return { valid: true, reason: 'no_secret_configured' };
   }
-  if (!headerToken) return false;
+  if (!headerToken) {
+    return { valid: false, reason: 'missing_header' };
+  }
   try {
-    const a = Buffer.from(headerToken);
+    const cleanHeader = String(headerToken).trim();
+    const a = Buffer.from(cleanHeader);
     const b = Buffer.from(secret);
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
+    if (a.length !== b.length) {
+      return { valid: false, reason: 'length_mismatch' };
+    }
+    const equal = crypto.timingSafeEqual(a, b);
+    return { valid: equal, reason: equal ? 'matched' : 'value_mismatch' };
   } catch {
-    return false;
+    return { valid: false, reason: 'comparison_error' };
+  }
+}
+
+async function getSafeTelegramWebhookDiagnostics() {
+  const cfg = getConfig();
+  const token = cfg.TELEGRAM_BOT_TOKEN;
+  const expectedUrl = cfg.PRODUCTION_WEBHOOK_URL;
+  const secretConfigured = Boolean(
+    cfg.TELEGRAM_WEBHOOK_SECRET && cfg.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
+  );
+
+  if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
+    return {
+      ok: false,
+      telegram_bot_token_configured: false,
+      telegram_webhook_secret_configured: secretConfigured,
+      expected_webhook_url: expectedUrl,
+      webhook_registered: false,
+      url_matches_production: false,
+      error: 'TELEGRAM_BOT_TOKEN is not configured in environment variables.',
+    };
+  }
+
+  try {
+    const [whResp, meResp] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`, { method: 'GET' }),
+      fetch(`https://api.telegram.org/bot${token}/getMe`, { method: 'GET' }),
+    ]);
+
+    const whData = await whResp.json();
+    const meData = await meResp.json();
+
+    const info = whData && whData.result ? whData.result : {};
+    const botInfo = meData && meData.result ? meData.result : null;
+    const currentUrl = String(info.url || '');
+    const urlMatches = currentUrl === expectedUrl;
+
+    return {
+      ok: Boolean(whData && whData.ok),
+      telegram_bot_token_configured: true,
+      telegram_webhook_secret_configured: secretConfigured,
+      bot: botInfo
+        ? {
+            id: botInfo.id,
+            username: botInfo.username,
+            first_name: botInfo.first_name,
+          }
+        : null,
+      expected_webhook_url: expectedUrl,
+      current_webhook_url: currentUrl,
+      webhook_registered: Boolean(currentUrl),
+      url_matches_production: urlMatches,
+      pending_update_count: info.pending_update_count ?? 0,
+      last_error_date: info.last_error_date
+        ? new Date(info.last_error_date * 1000).toISOString()
+        : null,
+      last_error_message: info.last_error_message || null,
+      max_connections: info.max_connections ?? null,
+      allowed_updates: info.allowed_updates || ['message', 'callback_query', 'pre_checkout_query'],
+      ip_address: info.ip_address || null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      telegram_bot_token_configured: true,
+      telegram_webhook_secret_configured: secretConfigured,
+      expected_webhook_url: expectedUrl,
+      webhook_registered: false,
+      url_matches_production: false,
+      error: err instanceof Error ? err.message : 'Failed to reach Telegram Bot API',
+    };
+  }
+}
+
+async function ensureTelegramWebhookRegistered(forceSync = false) {
+  const cfg = getConfig();
+  const token = cfg.TELEGRAM_BOT_TOKEN;
+  if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
+    return {
+      synced: false,
+      reason: 'TELEGRAM_BOT_TOKEN not configured',
+    };
+  }
+
+  try {
+    const currentDiag = await getSafeTelegramWebhookDiagnostics();
+    const hasSecretMismatchError =
+      currentDiag.last_error_message &&
+      (currentDiag.last_error_message.includes('401') ||
+        currentDiag.last_error_message.includes('404') ||
+        currentDiag.last_error_message.includes('500') ||
+        currentDiag.last_error_message.includes('Wrong response'));
+
+    const needsRegistration =
+      forceSync ||
+      !currentDiag.webhook_registered ||
+      !currentDiag.url_matches_production ||
+      hasSecretMismatchError;
+
+    if (!needsRegistration) {
+      return {
+        synced: false,
+        already_valid: true,
+        diagnostics: currentDiag,
+      };
+    }
+
+    const cleanSecret = sanitizeSecretToken(cfg.TELEGRAM_WEBHOOK_SECRET);
+    const setWebhookPayload = {
+      url: cfg.PRODUCTION_WEBHOOK_URL,
+      allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
+      drop_pending_updates: false,
+    };
+
+    if (cleanSecret && cleanSecret !== 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
+      setWebhookPayload.secret_token = cleanSecret;
+    }
+
+    const setRes = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(setWebhookPayload),
+    });
+    const setJson = await setRes.json();
+
+    await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commands: [
+          { command: 'start', description: 'Start DiwaliBigdeal & view main menu' },
+          { command: 'enter', description: 'Join DiwaliBigdeal (100 Telegram Stars ⭐️)' },
+          { command: 'ticket', description: 'View your confirmed DB2026 ticket' },
+          { command: 'prizes', description: 'View Mahindra Thar ROXX & prize details' },
+          { command: 'terms', description: 'View campaign rules & terms' },
+          { command: 'support', description: 'Get customer support' },
+        ],
+      }),
+    }).catch(() => {});
+
+    const updatedDiag = await getSafeTelegramWebhookDiagnostics();
+
+    logger.info('TelegramWebhook', 'Synchronized Telegram Bot webhook registration', {
+      ok: Boolean(setJson && setJson.ok),
+      url: cfg.PRODUCTION_WEBHOOK_URL,
+      secretTokenAttached: Boolean(setWebhookPayload.secret_token),
+    });
+
+    return {
+      synced: Boolean(setJson && setJson.ok),
+      description: setJson ? setJson.description : undefined,
+      diagnostics: updatedDiag,
+    };
+  } catch (err) {
+    logger.error('TelegramWebhook', 'Failed to synchronize Telegram webhook', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      synced: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -399,15 +578,14 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
       if (!response.ok) {
         const errBody = await response.text();
         logger.warn('TelegramAPI', `Telegram sendMessage returned HTTP ${response.status}`, {
-          chat_id: cid,
-          response: errBody,
+          status: response.status,
+          description: errBody.slice(0, 200),
         });
       } else {
-        logger.info('TelegramAPI', `Delivered Telegram message to chat_id=${cid}`);
+        logger.info('TelegramAPI', 'Delivered outgoing Telegram reply message');
       }
     } catch (err) {
       logger.error('TelegramAPI', 'Failed to call Telegram sendMessage', {
-        chat_id: cid,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -416,12 +594,6 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
   return outgoingRecord;
 }
 
-/**
- * Creates a Telegram Stars invoice link with:
- * - currency: "XTR"
- * - provider_token: ""
- * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
- */
 async function createTelegramStarsInvoiceLink(paymentId) {
   const token = getConfig().TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
@@ -461,13 +633,6 @@ async function createTelegramStarsInvoiceLink(paymentId) {
   return null;
 }
 
-/**
- * Sends a native Telegram Stars invoice with:
- * - currency: "XTR"
- * - provider_token: ""
- * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
- * - No Cancel button
- */
 async function sendTelegramStarsInvoice(chatId, paymentId) {
   const cid = String(chatId);
   const token = getConfig().TELEGRAM_BOT_TOKEN;
@@ -562,7 +727,6 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedStarsAmount, tel
     throw new Error(`Customer record not found for payment_id: ${paymentId}`);
   }
 
-  // Prevent duplicate tickets by telegram_payment_charge_id
   if (telegramPaymentChargeId) {
     const existingChargeTicket = db.getProcessedWebhookTicket(`charge_${telegramPaymentChargeId}`);
     if (existingChargeTicket && customer.ticket_number) {
@@ -574,7 +738,6 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedStarsAmount, tel
     }
   }
 
-  // Prevent duplicate tickets by payment_id
   const existingWebhookTicket = db.getProcessedWebhookTicket(paymentId);
   if (existingWebhookTicket && customer.ticket_number) {
     return {
@@ -610,9 +773,7 @@ function issueVerifiedTicket(paymentId, verifiedStatus, verifiedStarsAmount, tel
   }
 
   logger.info('TicketGenerator', `Issued unique ticket ${newTicketNumber}`, {
-    telegram_user_id: updatedCustomer.telegram_user_id,
     payment_id: paymentId,
-    telegram_payment_charge_id: telegramPaymentChargeId,
   });
 
   return {
@@ -737,9 +898,7 @@ async function processVerifiedPaymentWebhook({
     );
 
     logger.info('PaymentVerification', `Sent Telegram confirmation for ticket ${issuance.ticketNumber}`, {
-      telegram_user_id: issuance.customer.telegram_user_id,
       payment_id: paymentId,
-      charge_id: telegramPaymentChargeId || 'webhook',
     });
   }
 
@@ -762,6 +921,15 @@ function validateIndianMobileNumber(input) {
     return { valid: false, normalized: String(input || '').trim() };
   }
   return { valid: true, normalized: match[1] };
+}
+
+function normalizeBotCommand(rawText) {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed.startsWith('/')) {
+    return trimmed;
+  }
+  const firstToken = trimmed.split(/\s+/)[0];
+  return firstToken.split('@')[0].toLowerCase();
 }
 
 const BOT_MESSAGES = {
@@ -856,6 +1024,17 @@ const BOT_MESSAGES = {
       '11:59 PM IST',
     ].join('\n'),
 
+  termsDetails: () =>
+    [
+      '📜 DIWALI BIGDEAL — TERMS & CONDITIONS',
+      '',
+      '1. Entry Fee: 100 Telegram Stars ⭐️ (XTR).',
+      '2. Ticket Generation: A unique ticket (DB2026-XXXXXX) is issued strictly after verified Telegram Stars payment.',
+      '3. Eligibility: Participants must provide accurate Full Name, valid 10-digit Mobile Number, and Complete Address.',
+      '4. Prize Draw: Official winner announcement on 8 November 2026 at 11:59 PM IST.',
+      '5. Verification: Keep your confirmed ticket number safe for prize claim verification.',
+    ].join('\n'),
+
   supportMessage: () =>
     [
       '🆘 SUPPORT',
@@ -942,6 +1121,14 @@ async function handlePrizeDetailsTrigger(customer) {
   );
 }
 
+async function handleTermsTrigger(customer) {
+  await sendTelegramMessage(
+    customer.telegram_chat_id,
+    BOT_MESSAGES.termsDetails(),
+    MAIN_MENU_INLINE_KEYBOARD
+  );
+}
+
 async function handleSupportTrigger(customer) {
   await sendTelegramMessage(
     customer.telegram_chat_id,
@@ -1006,9 +1193,8 @@ async function handleTelegramUpdate(update) {
     if (sp.currency !== 'XTR' || Number(sp.total_amount) !== 100) {
       logger.security(
         'TelegramStars',
-        `Rejected successful_payment due to currency/amount mismatch`,
+        'Rejected successful_payment due to currency/amount mismatch',
         {
-          telegram_user_id: userId,
           payment_id: paymentId,
           currency: sp.currency,
           total_amount: sp.total_amount,
@@ -1042,6 +1228,7 @@ async function handleTelegramUpdate(update) {
       action_edit_details: '✏️ Edit Details',
       menu_my_ticket: '🎫 My Ticket',
       menu_prize_details: '🏆 Prize Details',
+      menu_terms: '📜 Terms & Conditions',
       menu_support: '🆘 Support',
     };
 
@@ -1102,6 +1289,11 @@ async function handleTelegramUpdate(update) {
       return customer;
     }
 
+    if (data === 'menu_terms') {
+      await handleTermsTrigger(customer);
+      return customer;
+    }
+
     if (data === 'menu_support') {
       await handleSupportTrigger(customer);
       return customer;
@@ -1110,12 +1302,13 @@ async function handleTelegramUpdate(update) {
     return customer;
   }
 
-  // 3. Handle Text Messages
-  if (update.message && typeof update.message.text === 'string') {
-    const msg = update.message;
-    const userId = String((msg.from && msg.from.id) || msg.chat.id);
-    const chatId = String(msg.chat.id);
-    const text = msg.text.trim();
+  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /terms, /enter, /support)
+  const incomingMsg = update.message || update.edited_message;
+  if (incomingMsg && typeof incomingMsg.text === 'string') {
+    const userId = String((incomingMsg.from && incomingMsg.from.id) || incomingMsg.chat.id);
+    const chatId = String(incomingMsg.chat.id);
+    const text = incomingMsg.text.trim();
+    const command = normalizeBotCommand(text);
 
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),
@@ -1128,8 +1321,9 @@ async function handleTelegramUpdate(update) {
     let customer = db.getOrCreateCustomer(userId, chatId);
 
     if (
-      text === '/start' ||
-      text === '/menu' ||
+      command === '/start' ||
+      command === '/menu' ||
+      command === '/help' ||
       text.toLowerCase() === 'menu' ||
       text.toLowerCase() === 'hi' ||
       text.toLowerCase() === 'hello'
@@ -1143,25 +1337,31 @@ async function handleTelegramUpdate(update) {
     }
 
     if (
+      command === '/enter' ||
+      command === '/join' ||
       text === '🎟️ Join Entry (100 Telegram Stars ⭐️)' ||
-      text === '🎟️ Join ₹199 Entry' ||
-      text === '/join'
+      text === '🎟️ Join ₹199 Entry'
     ) {
       await handleJoinEntryTrigger(customer);
       return db.getCustomerByUserId(userId);
     }
 
-    if (text === '🎫 My Ticket' || text === '/ticket') {
+    if (command === '/ticket' || command === '/myticket' || text === '🎫 My Ticket') {
       await handleMyTicketTrigger(customer);
       return customer;
     }
 
-    if (text === '🏆 Prize Details' || text === '/prizes') {
+    if (command === '/prizes' || command === '/prize' || text === '🏆 Prize Details') {
       await handlePrizeDetailsTrigger(customer);
       return customer;
     }
 
-    if (text === '🆘 Support' || text === '/support') {
+    if (command === '/terms' || command === '/rules' || text === '📜 Terms & Conditions') {
+      await handleTermsTrigger(customer);
+      return customer;
+    }
+
+    if (command === '/support' || text === '🆘 Support') {
       await handleSupportTrigger(customer);
       return customer;
     }
@@ -1297,16 +1497,51 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // 1b. Safe Diagnostic Webhook Status Endpoint (`GET` / `POST /api/telegram/status`)
+    if (urlPath === '/api/telegram/status') {
+      const forceSync =
+        req.method === 'POST' ||
+        rawUrl.includes('sync=1') ||
+        rawUrl.includes('register=1') ||
+        rawUrl.includes('setup=1');
+      const syncResult = await ensureTelegramWebhookRegistered(forceSync);
+      const diagnostics =
+        syncResult && syncResult.diagnostics
+          ? syncResult.diagnostics
+          : await getSafeTelegramWebhookDiagnostics();
+      return sendJson(res, 200, {
+        ok: true,
+        service: 'DiwaliBigdeal Telegram Webhook Diagnostics',
+        endpoint: '/api/telegram/status',
+        payment_mode: 'telegram_stars (XTR)',
+        currency: 'XTR',
+        stars_amount: 100,
+        supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
+        webhook_auto_synced: Boolean(syncResult && syncResult.synced),
+        webhook_registration: diagnostics,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     // 2. Telegram Webhook Endpoint (`GET` & `POST /api/telegram/webhook` or `/api/index`)
     if (urlPath === '/api/telegram/webhook' || urlPath === '/api/index' || urlPath === '/api') {
       if (req.method === 'GET') {
+        const forceSync =
+          rawUrl.includes('sync=1') || rawUrl.includes('register=1') || rawUrl.includes('setup=1');
+        const syncResult = await ensureTelegramWebhookRegistered(forceSync);
+        const webhookDiagnostics =
+          syncResult && syncResult.diagnostics
+            ? syncResult.diagnostics
+            : await getSafeTelegramWebhookDiagnostics();
         const status = getPublicConfigStatus();
+
         return sendJson(res, 200, {
           ok: true,
           service: 'DiwaliBigdeal Telegram Bot Webhook',
           endpoint: '/api/telegram/webhook',
           status: 'READY',
           supported_methods: ['POST', 'GET'],
+          supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
           supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
           payment_mode: 'telegram_stars (XTR)',
           currency: 'XTR',
@@ -1315,8 +1550,10 @@ module.exports = async function handler(req, res) {
           invoice_prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
           telegram_bot_token_configured: status.telegramBotTokenConfigured,
           telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
+          webhook_registration: webhookDiagnostics,
+          webhook_auto_synced: Boolean(syncResult && syncResult.synced),
           instructions:
-            'Send POST requests with Telegram Bot API Update JSON payloads to this endpoint. Register via https://api.telegram.org/bot<TOKEN>/setWebhook',
+            'Send POST requests with Telegram Bot API Update JSON payloads to this endpoint. Append ?sync=1 to force re-registering the Telegram webhook with the configured secret token.',
           timestamp: new Date().toISOString(),
         });
       }
@@ -1333,11 +1570,14 @@ module.exports = async function handler(req, res) {
         process.env.TELEGRAM_WEBHOOK_SECRET &&
         process.env.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
       ) {
-        if (!verifyTelegramWebhookSecret(secretHeader)) {
+        const check = verifyTelegramWebhookSecret(secretHeader);
+        if (!check.valid) {
           logger.security(
             'TelegramWebhook',
-            'Rejected unauthorized Telegram webhook request (invalid secret token)'
+            'Rejected unauthorized Telegram webhook request (secret token mismatch)',
+            { reason: check.reason }
           );
+          ensureTelegramWebhookRegistered(true).catch(() => {});
           return sendJson(res, 401, {
             ok: false,
             error: 'Unauthorized Telegram webhook secret token',
@@ -1355,15 +1595,16 @@ module.exports = async function handler(req, res) {
       }
 
       logger.webhook('TelegramWebhook', `Received Telegram update_id=${update.update_id}`, {
-        hasMessage: Boolean(update.message),
+        hasMessage: Boolean(update.message || update.edited_message),
         hasCallbackQuery: Boolean(update.callback_query),
         hasPreCheckoutQuery: Boolean(update.pre_checkout_query),
         hasSuccessfulPayment: Boolean(update.message && update.message.successful_payment),
       });
 
       const customer = await handleTelegramUpdate(update);
+      const msgObj = update.message || update.edited_message;
       const chatId = String(
-        (update.message && update.message.chat && update.message.chat.id) ||
+        (msgObj && msgObj.chat && msgObj.chat.id) ||
           (update.callback_query &&
             update.callback_query.message &&
             update.callback_query.message.chat &&

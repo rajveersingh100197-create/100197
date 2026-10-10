@@ -540,13 +540,27 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <button
                     onClick={() => dispatchTelegramTextUpdate(simUserId, '/start')}
                     title="Send /start"
-                    className="px-2.5 py-1 text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors whitespace-nowrap"
+                    className="px-2 py-1 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors whitespace-nowrap"
                   >
                     /start
+                  </button>
+                  <button
+                    onClick={() => dispatchTelegramTextUpdate(simUserId, '/enter')}
+                    title="Send /enter"
+                    className="px-2 py-1 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors whitespace-nowrap"
+                  >
+                    /enter
+                  </button>
+                  <button
+                    onClick={() => dispatchTelegramTextUpdate(simUserId, '/terms')}
+                    title="Send /terms"
+                    className="px-2 py-1 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors whitespace-nowrap"
+                  >
+                    /terms
                   </button>
                   <button
                     onClick={handleResetCustomer}
@@ -1210,6 +1224,15 @@ export default function App() {
                   </div>
                   <p className="text-slate-400 mt-1 leading-relaxed">
                     Receives Telegram Bot API <code className="text-slate-200">Update</code> payloads (<code className="text-slate-200">message</code>, <code className="text-slate-200">callback_query</code>, <code className="text-slate-200">pre_checkout_query</code>, and <code className="text-slate-200">successful_payment</code>). Validates <code className="text-amber-400">currency === &quot;XTR&quot;</code> and <code className="text-amber-400">total_amount === 100</code>.
+                  </p>
+                </div>
+
+                <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-lg">
+                  <div className="font-mono font-semibold text-amber-400">
+                    GET /api/telegram/status (?sync=1)
+                  </div>
+                  <p className="text-slate-400 mt-1 leading-relaxed">
+                    Safe diagnostic endpoint that calls Telegram <code className="text-slate-200">getWebhookInfo</code> without exposing secrets, verifies registration against <code className="text-slate-200">https://100197-oqqb.vercel.app/api/telegram/webhook</code>, and automatically synchronizes <code className="text-slate-200">secret_token</code> and <code className="text-slate-200">allowed_updates</code>.
                   </p>
                 </div>
 

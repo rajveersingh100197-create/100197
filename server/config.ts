@@ -6,19 +6,23 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+const rawAppUrl = (process.env.APP_URL || 'https://100197-oqqb.vercel.app').trim();
+const normalizedAppUrl = rawAppUrl.replace(/\/+$/, '');
+
 export const CONFIG = {
   PORT: Number(process.env.PORT) || 3000,
-  APP_URL: process.env.APP_URL || 'https://100197-oqqb.vercel.app',
+  APP_URL: normalizedAppUrl,
+  PRODUCTION_WEBHOOK_URL: 'https://100197-oqqb.vercel.app/api/telegram/webhook',
   CAMPAIGN_NAME: 'DiwaliBigdeal',
   CAMPAIGN_ENTRY_FEE: 100,
   TELEGRAM_STARS_AMOUNT: 100,
   DISPLAY_ENTRY_PRICE: '100 Telegram Stars ⭐️',
   PRIZE_ANNOUNCEMENT_DATE: '8 November 2026',
   PRIZE_ANNOUNCEMENT_TIME: '11:59 PM IST',
-  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
-  TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+  TELEGRAM_BOT_TOKEN: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+  TELEGRAM_WEBHOOK_SECRET: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
   PAYMENT_PROVIDER: 'telegram_stars',
-  PAYMENT_WEBHOOK_SECRET: process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026',
+  PAYMENT_WEBHOOK_SECRET: (process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026').trim(),
   DATABASE_PATH: process.env.DATABASE_PATH || './data/diwalibigdeal.sqlite',
   DATABASE_URL: process.env.DATABASE_URL || '',
   ADMIN_API_SECRET: process.env.ADMIN_API_SECRET || '',
@@ -45,5 +49,6 @@ export function getPublicConfigStatus() {
     paymentWebhookSecretConfigured: Boolean(CONFIG.PAYMENT_WEBHOOK_SECRET),
     databasePath: CONFIG.DATABASE_PATH,
     appUrl: CONFIG.APP_URL,
+    expectedWebhookUrl: CONFIG.PRODUCTION_WEBHOOK_URL,
   };
 }

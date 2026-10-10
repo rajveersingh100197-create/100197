@@ -4,11 +4,13 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express';
-import { CONFIG, getPublicConfigStatus } from './config';
+import { getPublicConfigStatus } from './config';
 import { db } from './db';
 import { logger } from './logger';
 import { handleTelegramUpdate } from './stateManager';
 import {
+  ensureTelegramWebhookRegistered,
+  getSafeTelegramWebhookDiagnostics,
   MAIN_MENU_INLINE_KEYBOARD,
   sendTelegramMessage,
   verifyTelegramWebhookSecret,
@@ -23,7 +25,6 @@ import { TelegramUpdate } from './types';
 
 export const app = express();
 
-// Capture rawBody for cryptographic webhook signature verification
 app.use(
   express.json({
     verify: (req: Request & { rawBody?: string }, _res, buf) => {
@@ -33,7 +34,7 @@ app.use(
 );
 
 // ============================================================================
-// 0. STATELESS HEALTH-CHECK ENDPOINT (No Telegram Secrets or Database Required)
+// 0. STATELESS HEALTH-CHECK ENDPOINT
 // GET /api/health
 // ============================================================================
 app.get('/api/health', (_req: Request, res: Response) => {
@@ -55,18 +56,54 @@ app.get('/api/health', (_req: Request, res: Response) => {
 });
 
 // ============================================================================
+// 0b. SAFE TELEGRAM WEBHOOK DIAGNOSTIC & SYNC ENDPOINT
+// GET /api/telegram/status (Reports getWebhookInfo without exposing secrets)
+// POST /api/telegram/status (Forces webhook & secret_token registration)
+// ============================================================================
+app.all('/api/telegram/status', async (req: Request, res: Response) => {
+  const forceSync =
+    req.method === 'POST' ||
+    req.query.sync === '1' ||
+    req.query.register === '1' ||
+    req.query.setup === '1';
+
+  const syncResult = await ensureTelegramWebhookRegistered(forceSync);
+  const diagnostics = syncResult.diagnostics || (await getSafeTelegramWebhookDiagnostics());
+
+  return res.status(200).json({
+    ok: true,
+    service: 'DiwaliBigdeal Telegram Webhook Diagnostics',
+    endpoint: '/api/telegram/status',
+    payment_mode: 'telegram_stars (XTR)',
+    currency: 'XTR',
+    stars_amount: 100,
+    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
+    webhook_auto_synced: Boolean(syncResult.synced),
+    webhook_registration: diagnostics,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ============================================================================
 // 1. PRODUCTION TELEGRAM WEBHOOK ENDPOINT
 // POST /api/telegram/webhook
-// GET  /api/telegram/webhook (Diagnostic Health Response)
+// GET  /api/telegram/webhook (Diagnostic Health + Auto-Registration Check)
 // ============================================================================
-app.get('/api/telegram/webhook', (_req: Request, res: Response) => {
+app.get('/api/telegram/webhook', async (req: Request, res: Response) => {
+  const forceSync =
+    req.query.sync === '1' || req.query.register === '1' || req.query.setup === '1';
+  const syncResult = await ensureTelegramWebhookRegistered(forceSync);
+  const webhookDiagnostics =
+    syncResult.diagnostics || (await getSafeTelegramWebhookDiagnostics());
   const status = getPublicConfigStatus();
+
   return res.status(200).json({
     ok: true,
     service: 'DiwaliBigdeal Telegram Bot Webhook',
     endpoint: '/api/telegram/webhook',
     status: 'READY',
     supported_methods: ['POST', 'GET'],
+    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
     supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
     payment_mode: 'telegram_stars (XTR)',
     currency: 'XTR',
@@ -75,8 +112,10 @@ app.get('/api/telegram/webhook', (_req: Request, res: Response) => {
     invoice_prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
     telegram_bot_token_configured: status.telegramBotTokenConfigured,
     telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
+    webhook_registration: webhookDiagnostics,
+    webhook_auto_synced: Boolean(syncResult.synced),
     instructions:
-      'Send POST requests with Telegram Bot API Update JSON payloads to this endpoint. Register via https://api.telegram.org/bot<TOKEN>/setWebhook',
+      'Send POST requests with Telegram Bot API Update JSON payloads to this endpoint. Append ?sync=1 to force re-registering the Telegram webhook with the configured secret token.',
     timestamp: new Date().toISOString(),
   });
 });
@@ -96,6 +135,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
           'TelegramWebhook',
           'Rejected unauthorized Telegram webhook request (invalid secret token)'
         );
+        ensureTelegramWebhookRegistered(true).catch(() => {});
         return res
           .status(401)
           .json({ ok: false, error: 'Unauthorized Telegram webhook secret token' });
@@ -175,8 +215,8 @@ app.post('/api/payment/create', async (req: Request, res: Response) => {
 
 // ============================================================================
 // 3. SERVER-SIDE PAYMENT WEBHOOK ENDPOINT
-// GET  /api/payment/webhook (Diagnostic Status)
-// POST /api/payment/webhook (Signed Webhook Verification)
+// GET  /api/payment/webhook
+// POST /api/payment/webhook
 // ============================================================================
 app.get('/api/payment/webhook', (_req: Request, res: Response) => {
   return res.status(200).json({
@@ -200,8 +240,7 @@ app.post('/api/payment/webhook', async (req: Request & { rawBody?: string }, res
     if (!verifyPaymentWebhookSignature(rawBody, signature)) {
       logger.security(
         'PaymentWebhook',
-        'Rejected payment webhook due to invalid HMAC-SHA256 signature',
-        { providedSignature: signature || 'missing' }
+        'Rejected payment webhook due to invalid HMAC-SHA256 signature'
       );
       return res.status(401).json({
         ok: false,
@@ -218,12 +257,6 @@ app.post('/api/payment/webhook', async (req: Request & { rawBody?: string }, res
     if (!paymentId) {
       return res.status(400).json({ ok: false, error: 'Missing payment_id in webhook payload' });
     }
-
-    logger.webhook('PaymentWebhook', `Verified payment webhook for ${paymentId}`, {
-      eventStatus,
-      currency,
-      totalAmount,
-    });
 
     const result = await processVerifiedPaymentWebhook({
       paymentId,
@@ -367,8 +400,7 @@ app.post('/api/admin/trigger-payment-webhook', async (req: Request, res: Respons
     if (!verifyPaymentWebhookSignature(rawBody, signatureToUse)) {
       logger.security(
         'PaymentWebhook',
-        `Rejected tampered webhook signature for payment_id=${payment_id}`,
-        { signatureToUse }
+        `Rejected tampered webhook signature for payment_id=${payment_id}`
       );
       return res.status(401).json({
         ok: false,

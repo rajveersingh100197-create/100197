@@ -24,18 +24,6 @@ import {
   processVerifiedPaymentWebhook,
 } from './paymentService';
 
-/**
- * Conversation & State Machine Manager for "DiwaliBigdeal"
- *
- * Strictly implements:
- * - Displayed entry price: "100 Telegram Stars ⭐️" (never ₹199)
- * - Telegram Stars invoice: currency "XTR", prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
- * - pre_checkout_query validation: currency === "XTR" and total_amount === 100
- * - successful_payment validation: currency === "XTR" and total_amount === 100
- * - Unique DB2026-XXXXXX ticket generated ONLY after verified successful_payment (with duplicate prevention)
- * - Zero Cancel buttons in confirmation or payment flow.
- */
-
 export function validateIndianMobileNumber(input: string): {
   valid: boolean;
   normalized: string;
@@ -46,6 +34,18 @@ export function validateIndianMobileNumber(input: string): {
     return { valid: false, normalized: input.trim() };
   }
   return { valid: true, normalized: match[1] };
+}
+
+/**
+ * Normalizes Telegram slash commands by stripping @BotUsername suffixes and lowercasing.
+ */
+export function normalizeBotCommand(rawText: string): string {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed.startsWith('/')) {
+    return trimmed;
+  }
+  const firstToken = trimmed.split(/\s+/)[0];
+  return firstToken.split('@')[0].toLowerCase();
 }
 
 export const BOT_MESSAGES = {
@@ -140,6 +140,17 @@ export const BOT_MESSAGES = {
       '11:59 PM IST',
     ].join('\n'),
 
+  termsDetails: () =>
+    [
+      '📜 DIWALI BIGDEAL — TERMS & CONDITIONS',
+      '',
+      '1. Entry Fee: 100 Telegram Stars ⭐️ (XTR).',
+      '2. Ticket Generation: A unique ticket (DB2026-XXXXXX) is issued strictly after verified Telegram Stars payment.',
+      '3. Eligibility: Participants must provide accurate Full Name, valid 10-digit Mobile Number, and Complete Address.',
+      '4. Prize Draw: Official winner announcement on 8 November 2026 at 11:59 PM IST.',
+      '5. Verification: Keep your confirmed ticket number safe for prize claim verification.',
+    ].join('\n'),
+
   supportMessage: () =>
     [
       '🆘 SUPPORT',
@@ -148,12 +159,6 @@ export const BOT_MESSAGES = {
     ].join('\n'),
 };
 
-/**
- * Sends the Confirmation Screen with ONLY:
- * - ✅ Confirm & Pay 100 Telegram Stars ⭐️
- * - ✏️ Edit Details
- * (NO Cancel button)
- */
 async function sendConfirmationScreen(customer: CustomerRecord) {
   const text = BOT_MESSAGES.confirmDetails(
     customer.name || '',
@@ -161,6 +166,7 @@ async function sendConfirmationScreen(customer: CustomerRecord) {
     customer.address || ''
   );
 
+  // Strictly NO Cancel button
   await sendTelegramMessage(customer.telegram_chat_id, text, {
     inline_keyboard: [
       [
@@ -174,17 +180,13 @@ async function sendConfirmationScreen(customer: CustomerRecord) {
   });
 }
 
-/**
- * Sends the Payment Screen with ONLY:
- * - [💰 Pay 100 Telegram Stars ⭐️]
- * (NO Cancel button)
- */
 async function sendPaymentScreen(customer: CustomerRecord) {
   const paymentOrder = await createPaymentOrderForCustomer(customer);
   const text = BOT_MESSAGES.paymentPrompt();
 
   const isNativeTelegramStarsLink = paymentOrder.payment_url.startsWith('https://t.me/$');
 
+  // Strictly NO Cancel button
   await sendTelegramMessage(customer.telegram_chat_id, text, {
     inline_keyboard: [
       [
@@ -241,6 +243,14 @@ async function handlePrizeDetailsTrigger(customer: CustomerRecord) {
   );
 }
 
+async function handleTermsTrigger(customer: CustomerRecord) {
+  await sendTelegramMessage(
+    customer.telegram_chat_id,
+    BOT_MESSAGES.termsDetails(),
+    MAIN_MENU_INLINE_KEYBOARD
+  );
+}
+
 async function handleSupportTrigger(customer: CustomerRecord) {
   await sendTelegramMessage(
     customer.telegram_chat_id,
@@ -249,20 +259,12 @@ async function handleSupportTrigger(customer: CustomerRecord) {
   );
 }
 
-/**
- * Main entry point for processing any incoming Telegram Update:
- * - `pre_checkout_query` (Validates currency === "XTR" and total_amount === 100)
- * - `message.successful_payment` (Validates currency === "XTR" and total_amount === 100, then issues unique ticket)
- * - `callback_query` (Inline keyboard button taps)
- * - `message.text` (Standard text messages & commands)
- */
 export async function handleTelegramUpdate(update: TelegramUpdate): Promise<CustomerRecord | null> {
   // 0. Handle Telegram Stars `pre_checkout_query`
   if (update.pre_checkout_query) {
     const pcq = update.pre_checkout_query;
     const paymentId = pcq.invoice_payload;
 
-    // Validate currency === "XTR" and total_amount === 100
     if (pcq.currency !== 'XTR' || Number(pcq.total_amount) !== 100) {
       logger.security(
         'TelegramStars',
@@ -288,12 +290,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       return null;
     }
 
-    // Prevent double payment if customer already has a confirmed ticket
     if (customer.payment_status === PaymentStatus.PAID && customer.ticket_number) {
-      logger.info(
-        'TelegramStars',
-        `Rejected pre_checkout_query: customer ${customer.telegram_user_id} already holds confirmed ticket ${customer.ticket_number}`
-      );
       await answerTelegramPreCheckoutQuery(
         pcq.id,
         false,
@@ -302,11 +299,6 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       return customer;
     }
 
-    logger.info('TelegramStars', `Approved pre_checkout_query for ${paymentId} (100 XTR)`, {
-      telegram_user_id: customer.telegram_user_id,
-      currency: pcq.currency,
-      total_amount: pcq.total_amount,
-    });
     await answerTelegramPreCheckoutQuery(pcq.id, true);
     return customer;
   }
@@ -321,13 +313,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
 
     db.getOrCreateCustomer(userId, chatId);
 
-    // Strictly validate currency === "XTR" and total_amount === 100
     if (sp.currency !== 'XTR' || Number(sp.total_amount) !== 100) {
       logger.security(
         'TelegramStars',
-        `Rejected successful_payment due to currency/amount mismatch`,
+        'Rejected successful_payment due to currency/amount mismatch',
         {
-          telegram_user_id: userId,
           payment_id: paymentId,
           currency: sp.currency,
           total_amount: sp.total_amount,
@@ -335,14 +325,6 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       );
       return db.getCustomerByUserId(userId);
     }
-
-    logger.webhook('TelegramStars', `Received verified successful_payment (100 XTR) from Telegram`, {
-      telegram_user_id: userId,
-      payment_id: paymentId,
-      currency: sp.currency,
-      total_amount: sp.total_amount,
-      charge_id: sp.telegram_payment_charge_id,
-    });
 
     const result = await processVerifiedPaymentWebhook({
       paymentId,
@@ -369,6 +351,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       action_edit_details: '✏️ Edit Details',
       menu_my_ticket: '🎫 My Ticket',
       menu_prize_details: '🏆 Prize Details',
+      menu_terms: '📜 Terms & Conditions',
       menu_support: '🆘 Support',
     };
 
@@ -387,24 +370,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     await answerTelegramCallbackQuery(cb.id);
 
     let customer = db.getOrCreateCustomer(userId, chatId);
-    logger.info('StateManager', `Callback query "${data}" from user ${userId}`, {
-      currentState: customer.conversation_state,
-    });
 
     if (data === 'menu_join_199') {
       await handleJoinEntryTrigger(customer);
       return db.getCustomerByUserId(userId);
     }
 
-    if (data === 'action_continue_join') {
-      customer = db.updateCustomer(userId, {
-        conversation_state: ConversationState.WAITING_FOR_NAME,
-      });
-      await sendTelegramMessage(chatId, BOT_MESSAGES.askFullName());
-      return customer;
-    }
-
-    if (data === 'action_edit_details') {
+    if (data === 'action_continue_join' || data === 'action_edit_details') {
       customer = db.updateCustomer(userId, {
         conversation_state: ConversationState.WAITING_FOR_NAME,
       });
@@ -426,12 +398,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     }
 
     if (data.startsWith('pay_link_')) {
-      // IMPORTANT: Do NOT mark the entry as paid merely because the customer clicked the payment button.
       const paymentId = data.replace('pay_link_', '');
-      logger.info(
-        'StateManager',
-        `Customer ${userId} clicked Pay button (${paymentId}). Dispatching 100 XTR Telegram Stars invoice if live token configured; awaiting verified successful_payment.`
-      );
       await sendTelegramStarsInvoice(chatId, paymentId);
       return db.getCustomerByUserId(userId);
     }
@@ -446,6 +413,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       return customer;
     }
 
+    if (data === 'menu_terms') {
+      await handleTermsTrigger(customer);
+      return customer;
+    }
+
     if (data === 'menu_support') {
       await handleSupportTrigger(customer);
       return customer;
@@ -454,12 +426,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     return customer;
   }
 
-  // 3. Handle Standard Text Messages
+  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /terms, /enter, /support)
   if (update.message && typeof update.message.text === 'string') {
     const msg = update.message;
     const userId = String(msg.from?.id || msg.chat.id);
     const chatId = String(msg.chat.id);
     const text = msg.text.trim();
+    const command = normalizeBotCommand(text);
 
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),
@@ -470,13 +443,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     });
 
     let customer = db.getOrCreateCustomer(userId, chatId);
-    logger.info('StateManager', `Message from user ${userId} in state=${customer.conversation_state}`, {
-      text,
-    });
 
     if (
-      text === '/start' ||
-      text === '/menu' ||
+      command === '/start' ||
+      command === '/menu' ||
+      command === '/help' ||
       text.toLowerCase() === 'menu' ||
       text.toLowerCase() === 'hi' ||
       text.toLowerCase() === 'hello'
@@ -490,25 +461,31 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     }
 
     if (
+      command === '/enter' ||
+      command === '/join' ||
       text === '🎟️ Join Entry (100 Telegram Stars ⭐️)' ||
-      text === '🎟️ Join ₹199 Entry' ||
-      text === '/join'
+      text === '🎟️ Join ₹199 Entry'
     ) {
       await handleJoinEntryTrigger(customer);
       return db.getCustomerByUserId(userId);
     }
 
-    if (text === '🎫 My Ticket' || text === '/ticket') {
+    if (command === '/ticket' || command === '/myticket' || text === '🎫 My Ticket') {
       await handleMyTicketTrigger(customer);
       return customer;
     }
 
-    if (text === '🏆 Prize Details' || text === '/prizes') {
+    if (command === '/prizes' || command === '/prize' || text === '🏆 Prize Details') {
       await handlePrizeDetailsTrigger(customer);
       return customer;
     }
 
-    if (text === '🆘 Support' || text === '/support') {
+    if (command === '/terms' || command === '/rules' || text === '📜 Terms & Conditions') {
+      await handleTermsTrigger(customer);
+      return customer;
+    }
+
+    if (command === '/support' || text === '🆘 Support') {
       await handleSupportTrigger(customer);
       return customer;
     }

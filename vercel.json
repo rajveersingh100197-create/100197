@@ -10,6 +10,10 @@
       "destination": "/api/telegram/webhook"
     },
     {
+      "source": "/api/telegram/status",
+      "destination": "/api/telegram/status"
+    },
+    {
       "source": "/api/payment/webhook",
       "destination": "/api/payment/webhook"
     },
