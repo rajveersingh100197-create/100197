@@ -57,34 +57,16 @@ function getPublicConfigStatus() {
 }
 
 // ============================================================================
-// 2. STRUCTURED LOGGER (NO SECRETS OR SENSITIVE CUSTOMER DATA EXPOSED)
+// 2. STRUCTURED LOGGER + PERSISTENT TELEMETRY (NO SECRETS OR PII EXPOSED)
 // ============================================================================
 const MAX_LOGS = 200;
 const logs = [];
 
-const logger = {
-  log(level, component, message, metadata) {
-    const entry = {
-      id: crypto.randomUUID(),
-      level,
-      component,
-      message,
-      metadata,
-      timestamp: new Date().toISOString(),
-    };
-    logs.unshift(entry);
-    if (logs.length > MAX_LOGS) logs.pop();
-    const metaStr = metadata ? ` ${JSON.stringify(metadata)}` : '';
-    console.log(`[${entry.timestamp}] [${level}] [${component}] ${message}${metaStr}`);
-    return entry;
-  },
-  info(c, m, meta) { return this.log('INFO', c, m, meta); },
-  warn(c, m, meta) { return this.log('WARN', c, m, meta); },
-  error(c, m, meta) { return this.log('ERROR', c, m, meta); },
-  security(c, m, meta) { return this.log('SECURITY', c, m, meta); },
-  webhook(c, m, meta) { return this.log('WEBHOOK', c, m, meta); },
-  getRecentLogs(limit = 80) { return logs.slice(0, limit); },
-};
+const DATA_DIR =
+  process.env.VERCEL === '1' || process.env.VERCEL
+    ? '/tmp/diwalibigdeal'
+    : path.resolve(process.cwd(), 'data');
+const JSON_DB_FILE = path.join(DATA_DIR, 'diwalibigdeal_store.json');
 
 // ============================================================================
 // 3. DATABASE LAYER (/tmp ON VERCEL SERVERLESS, ./data LOCALLY)
@@ -106,12 +88,6 @@ const PaymentStatus = {
   FAILED: 'FAILED',
 };
 
-const DATA_DIR =
-  process.env.VERCEL === '1' || process.env.VERCEL
-    ? '/tmp/diwalibigdeal'
-    : path.resolve(process.cwd(), 'data');
-const JSON_DB_FILE = path.join(DATA_DIR, 'diwalibigdeal_store.json');
-
 class DatabaseManager {
   constructor() {
     this.store = {
@@ -119,6 +95,18 @@ class DatabaseManager {
       ticketSequence: 0,
       processedWebhooks: {},
       chatHistories: {},
+      systemLogs: [],
+      webhookTelemetry: {
+        last_update_received_at: null,
+        last_update_id: null,
+        last_update_type: null,
+        last_send_message_status: null,
+        last_send_message_at: null,
+        last_send_message_error: null,
+        last_auth_failure_at: null,
+        last_auth_failure_reason: null,
+        total_updates_received: 0,
+      },
     };
     this.init();
   }
@@ -136,15 +124,47 @@ class DatabaseManager {
           ticketSequence: typeof parsed.ticketSequence === 'number' ? parsed.ticketSequence : 0,
           processedWebhooks: parsed.processedWebhooks || {},
           chatHistories: parsed.chatHistories || {},
+          systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
+          webhookTelemetry: parsed.webhookTelemetry || {
+            last_update_received_at: null,
+            last_update_id: null,
+            last_update_type: null,
+            last_send_message_status: null,
+            last_send_message_at: null,
+            last_send_message_error: null,
+            last_auth_failure_at: null,
+            last_auth_failure_reason: null,
+            total_updates_received: 0,
+          },
         };
       } else {
         this.seedDemoEntries();
         this.persist();
       }
-    } catch (err) {
-      logger.warn('Database', 'Using in-memory storage fallback', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    } catch (_err) {
+      // Safe fallback in ephemeral serverless environment
+    }
+  }
+
+  reloadFromDisk() {
+    try {
+      if (fs.existsSync(JSON_DB_FILE)) {
+        const raw = fs.readFileSync(JSON_DB_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        this.store.customers = parsed.customers || this.store.customers;
+        this.store.ticketSequence =
+          typeof parsed.ticketSequence === 'number'
+            ? parsed.ticketSequence
+            : this.store.ticketSequence;
+        this.store.processedWebhooks = parsed.processedWebhooks || this.store.processedWebhooks;
+        this.store.chatHistories = parsed.chatHistories || this.store.chatHistories;
+        this.store.systemLogs = Array.isArray(parsed.systemLogs)
+          ? parsed.systemLogs
+          : this.store.systemLogs;
+        this.store.webhookTelemetry = parsed.webhookTelemetry || this.store.webhookTelemetry;
+      }
+    } catch (_err) {
+      // Ignore read errors
     }
   }
 
@@ -199,7 +219,39 @@ class DatabaseManager {
     }
   }
 
+  appendSystemLog(entry) {
+    this.reloadFromDisk();
+    if (!Array.isArray(this.store.systemLogs)) {
+      this.store.systemLogs = [];
+    }
+    this.store.systemLogs.unshift(entry);
+    if (this.store.systemLogs.length > 100) {
+      this.store.systemLogs = this.store.systemLogs.slice(0, 100);
+    }
+    this.persist();
+  }
+
+  getRecentSystemLogs(limit = 80) {
+    this.reloadFromDisk();
+    return (this.store.systemLogs || []).slice(0, limit);
+  }
+
+  updateTelemetry(patch) {
+    this.reloadFromDisk();
+    this.store.webhookTelemetry = {
+      ...(this.store.webhookTelemetry || {}),
+      ...patch,
+    };
+    this.persist();
+  }
+
+  getTelemetry() {
+    this.reloadFromDisk();
+    return this.store.webhookTelemetry || {};
+  }
+
   getOrCreateCustomer(telegramUserId, telegramChatId) {
+    this.reloadFromDisk();
     const uid = String(telegramUserId);
     const cid = String(telegramChatId);
     const existing = this.store.customers[uid];
@@ -234,11 +286,13 @@ class DatabaseManager {
   }
 
   getCustomerByUserId(telegramUserId) {
+    this.reloadFromDisk();
     const rec = this.store.customers[String(telegramUserId)];
     return rec ? { ...rec } : null;
   }
 
   getCustomerByPaymentId(paymentId) {
+    this.reloadFromDisk();
     for (const key of Object.keys(this.store.customers)) {
       const cust = this.store.customers[key];
       if (cust.payment_id === paymentId) {
@@ -249,6 +303,7 @@ class DatabaseManager {
   }
 
   getCustomerByTicketNumber(ticketNumber) {
+    this.reloadFromDisk();
     for (const key of Object.keys(this.store.customers)) {
       const cust = this.store.customers[key];
       if (cust.ticket_number === ticketNumber) {
@@ -259,6 +314,7 @@ class DatabaseManager {
   }
 
   updateCustomer(telegramUserId, updates) {
+    this.reloadFromDisk();
     const uid = String(telegramUserId);
     const current = this.store.customers[uid];
     if (!current) {
@@ -275,6 +331,7 @@ class DatabaseManager {
   }
 
   allocateNextTicketNumber() {
+    this.reloadFromDisk();
     let candidate = '';
     do {
       this.store.ticketSequence += 1;
@@ -287,21 +344,25 @@ class DatabaseManager {
   }
 
   getProcessedWebhookTicket(paymentId) {
+    this.reloadFromDisk();
     return this.store.processedWebhooks[paymentId] || null;
   }
 
   markWebhookProcessed(paymentId, ticketNumber) {
+    this.reloadFromDisk();
     this.store.processedWebhooks[paymentId] = ticketNumber;
     this.persist();
   }
 
   listAllCustomers() {
+    this.reloadFromDisk();
     return Object.values(this.store.customers).sort(
       (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
     );
   }
 
   appendChatMessage(chatId, msg) {
+    this.reloadFromDisk();
     const cid = String(chatId);
     if (!this.store.chatHistories[cid]) {
       this.store.chatHistories[cid] = [];
@@ -314,10 +375,12 @@ class DatabaseManager {
   }
 
   getChatHistory(chatId) {
+    this.reloadFromDisk();
     return this.store.chatHistories[String(chatId)] || [];
   }
 
   resetCustomerForTesting(telegramUserId) {
+    this.reloadFromDisk();
     const uid = String(telegramUserId);
     delete this.store.customers[uid];
     delete this.store.chatHistories[uid];
@@ -345,6 +408,31 @@ CREATE TABLE IF NOT EXISTS customers (
 
 const db = new DatabaseManager();
 
+const logger = {
+  log(level, component, message, metadata) {
+    const entry = {
+      id: crypto.randomUUID(),
+      level,
+      component,
+      message,
+      metadata,
+      timestamp: new Date().toISOString(),
+    };
+    logs.unshift(entry);
+    if (logs.length > MAX_LOGS) logs.pop();
+    db.appendSystemLog(entry);
+    const metaStr = metadata ? ` ${JSON.stringify(metadata)}` : '';
+    console.log(`[${entry.timestamp}] [${level}] [${component}] ${message}${metaStr}`);
+    return entry;
+  },
+  info(c, m, meta) { return this.log('INFO', c, m, meta); },
+  warn(c, m, meta) { return this.log('WARN', c, m, meta); },
+  error(c, m, meta) { return this.log('ERROR', c, m, meta); },
+  security(c, m, meta) { return this.log('SECURITY', c, m, meta); },
+  webhook(c, m, meta) { return this.log('WEBHOOK', c, m, meta); },
+  getRecentLogs(limit = 80) { return db.getRecentSystemLogs(limit); },
+};
+
 // ============================================================================
 // 4. TELEGRAM BOT API & TELEGRAM STARS (100 XTR) SERVICE
 // ============================================================================
@@ -365,26 +453,36 @@ function sanitizeSecretToken(raw) {
     .replace(/[^A-Za-z0-9_-]/g, '');
 }
 
+function timingSafeCompareStrings(aStr, bStr) {
+  try {
+    const a = Buffer.from(String(aStr));
+    const b = Buffer.from(String(bStr));
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 function verifyTelegramWebhookSecret(headerToken) {
-  const secret = sanitizeSecretToken(getConfig().TELEGRAM_WEBHOOK_SECRET);
-  if (!secret || secret === 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
+  const rawSecret = getConfig().TELEGRAM_WEBHOOK_SECRET;
+  const sanitizedSecret = sanitizeSecretToken(rawSecret);
+
+  if (!rawSecret || rawSecret === 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
     return { valid: true, reason: 'no_secret_configured' };
   }
   if (!headerToken) {
     return { valid: false, reason: 'missing_header' };
   }
-  try {
-    const cleanHeader = String(headerToken).trim();
-    const a = Buffer.from(cleanHeader);
-    const b = Buffer.from(secret);
-    if (a.length !== b.length) {
-      return { valid: false, reason: 'length_mismatch' };
-    }
-    const equal = crypto.timingSafeEqual(a, b);
-    return { valid: equal, reason: equal ? 'matched' : 'value_mismatch' };
-  } catch {
-    return { valid: false, reason: 'comparison_error' };
+
+  const cleanHeader = String(headerToken).trim();
+  if (timingSafeCompareStrings(cleanHeader, rawSecret)) {
+    return { valid: true, reason: 'matched_raw' };
   }
+  if (sanitizedSecret && timingSafeCompareStrings(cleanHeader, sanitizedSecret)) {
+    return { valid: true, reason: 'matched_sanitized' };
+  }
+  return { valid: false, reason: 'value_mismatch' };
 }
 
 async function getSafeTelegramWebhookDiagnostics() {
@@ -404,6 +502,7 @@ async function getSafeTelegramWebhookDiagnostics() {
       webhook_registered: false,
       url_matches_production: false,
       error: 'TELEGRAM_BOT_TOKEN is not configured in environment variables.',
+      telemetry: db.getTelemetry(),
     };
   }
 
@@ -444,6 +543,7 @@ async function getSafeTelegramWebhookDiagnostics() {
       max_connections: info.max_connections ?? null,
       allowed_updates: info.allowed_updates || ['message', 'callback_query', 'pre_checkout_query'],
       ip_address: info.ip_address || null,
+      telemetry: db.getTelemetry(),
     };
   } catch (err) {
     return {
@@ -454,6 +554,7 @@ async function getSafeTelegramWebhookDiagnostics() {
       webhook_registered: false,
       url_matches_production: false,
       error: err instanceof Error ? err.message : 'Failed to reach Telegram Bot API',
+      telemetry: db.getTelemetry(),
     };
   }
 }
@@ -470,7 +571,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
 
   try {
     const currentDiag = await getSafeTelegramWebhookDiagnostics();
-    const hasSecretMismatchError =
+    const hasDeliveryError =
       currentDiag.last_error_message &&
       (currentDiag.last_error_message.includes('401') ||
         currentDiag.last_error_message.includes('404') ||
@@ -481,7 +582,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
       forceSync ||
       !currentDiag.webhook_registered ||
       !currentDiag.url_matches_production ||
-      hasSecretMismatchError;
+      hasDeliveryError;
 
     if (!needsRegistration) {
       return {
@@ -577,16 +678,32 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
 
       if (!response.ok) {
         const errBody = await response.text();
+        db.updateTelemetry({
+          last_send_message_status: `HTTP_${response.status}`,
+          last_send_message_at: new Date().toISOString(),
+          last_send_message_error: errBody.slice(0, 200),
+        });
         logger.warn('TelegramAPI', `Telegram sendMessage returned HTTP ${response.status}`, {
           status: response.status,
           description: errBody.slice(0, 200),
         });
       } else {
+        db.updateTelemetry({
+          last_send_message_status: 'OK_200',
+          last_send_message_at: new Date().toISOString(),
+          last_send_message_error: null,
+        });
         logger.info('TelegramAPI', 'Delivered outgoing Telegram reply message');
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      db.updateTelemetry({
+        last_send_message_status: 'NETWORK_ERROR',
+        last_send_message_at: new Date().toISOString(),
+        last_send_message_error: errMsg,
+      });
       logger.error('TelegramAPI', 'Failed to call Telegram sendMessage', {
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       });
     }
   }
@@ -1572,12 +1689,16 @@ module.exports = async function handler(req, res) {
       ) {
         const check = verifyTelegramWebhookSecret(secretHeader);
         if (!check.valid) {
+          db.updateTelemetry({
+            last_auth_failure_at: new Date().toISOString(),
+            last_auth_failure_reason: check.reason,
+          });
           logger.security(
             'TelegramWebhook',
             'Rejected unauthorized Telegram webhook request (secret token mismatch)',
             { reason: check.reason }
           );
-          ensureTelegramWebhookRegistered(true).catch(() => {});
+          await ensureTelegramWebhookRegistered(true).catch(() => {});
           return sendJson(res, 401, {
             ok: false,
             error: 'Unauthorized Telegram webhook secret token',
@@ -1594,7 +1715,26 @@ module.exports = async function handler(req, res) {
         });
       }
 
+      const updateType = update.pre_checkout_query
+        ? 'pre_checkout_query'
+        : update.callback_query
+        ? 'callback_query'
+        : update.message && update.message.successful_payment
+        ? 'successful_payment'
+        : update.message || update.edited_message
+        ? 'message'
+        : 'unknown';
+
+      const prevTelemetry = db.getTelemetry();
+      db.updateTelemetry({
+        last_update_received_at: new Date().toISOString(),
+        last_update_id: update.update_id,
+        last_update_type: updateType,
+        total_updates_received: (prevTelemetry.total_updates_received || 0) + 1,
+      });
+
       logger.webhook('TelegramWebhook', `Received Telegram update_id=${update.update_id}`, {
+        updateType,
         hasMessage: Boolean(update.message || update.edited_message),
         hasCallbackQuery: Boolean(update.callback_query),
         hasPreCheckoutQuery: Boolean(update.pre_checkout_query),
@@ -1701,6 +1841,7 @@ module.exports = async function handler(req, res) {
         stats,
         customers,
         logs: recentLogs,
+        telemetry: db.getTelemetry(),
         sqlSchema: db.getSQLSchemaDDL(),
       });
     }

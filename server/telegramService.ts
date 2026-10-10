@@ -40,22 +40,35 @@ export function sanitizeSecretToken(raw?: string): string {
     .replace(/[^A-Za-z0-9_-]/g, '');
 }
 
-export function verifyTelegramWebhookSecret(headerToken?: string): boolean {
-  const secret = sanitizeSecretToken(CONFIG.TELEGRAM_WEBHOOK_SECRET);
-  if (!secret || secret === 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
-    return true;
-  }
-  if (!headerToken) {
-    return false;
-  }
+function timingSafeCompareStrings(aStr: string, bStr: string): boolean {
   try {
-    const a = Buffer.from(headerToken.trim());
-    const b = Buffer.from(secret);
+    const a = Buffer.from(aStr);
+    const b = Buffer.from(bStr);
     if (a.length !== b.length) return false;
     return crypto.timingSafeEqual(a, b);
   } catch {
     return false;
   }
+}
+
+export function verifyTelegramWebhookSecret(headerToken?: string): boolean {
+  const rawSecret = CONFIG.TELEGRAM_WEBHOOK_SECRET;
+  const sanitizedSecret = sanitizeSecretToken(rawSecret);
+
+  if (!rawSecret || rawSecret === 'YOUR_TELEGRAM_WEBHOOK_SECRET') {
+    return true;
+  }
+  if (!headerToken) {
+    return false;
+  }
+  const cleanHeader = headerToken.trim();
+  if (timingSafeCompareStrings(cleanHeader, rawSecret)) {
+    return true;
+  }
+  if (sanitizedSecret && timingSafeCompareStrings(cleanHeader, sanitizedSecret)) {
+    return true;
+  }
+  return false;
 }
 
 /**
