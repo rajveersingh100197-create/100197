@@ -23,6 +23,7 @@ export enum PaymentStatus {
 export interface CustomerRecord {
   telegram_user_id: string;
   telegram_chat_id: string;
+  username?: string | null;
   name: string | null;
   phone: string | null;
   address: string | null;
@@ -31,6 +32,9 @@ export interface CustomerRecord {
   payment_status: PaymentStatus;
   payment_amount: number;
   ticket_number: string | null;
+  referral_code: string;
+  referred_by: string | null;
+  referral_count: number;
   created_at: string;
   updated_at: string;
 }

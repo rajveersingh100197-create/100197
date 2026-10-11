@@ -5,9 +5,10 @@
 
 import crypto from 'crypto';
 import { CONFIG } from './config';
-import { db } from './db';
+import { db, AdminNotificationEntry } from './db';
 import { logger } from './logger';
 import {
+  CustomerRecord,
   InlineKeyboardMarkup,
   OutgoingBotMessage,
   ReplyKeyboardMarkup,
@@ -41,6 +42,278 @@ export function sanitizeSecretToken(raw?: string): string {
   return String(raw || '')
     .trim()
     .replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+/**
+ * Validates that TELEGRAM_ADMIN_CHAT_ID is a configured private group / supergroup ID
+ * (negative integer, e.g. -1001234567890) and NOT a placeholder or customer's positive ID.
+ */
+export function validateAdminGroupChatId(rawChatId = CONFIG.TELEGRAM_ADMIN_CHAT_ID): {
+  valid: boolean;
+  chatId: string;
+  reason?: string;
+} {
+  const cleaned = String(rawChatId || '').trim();
+  if (!cleaned || cleaned === 'YOUR_PRIVATE_ADMIN_GROUP_CHAT_ID') {
+    return {
+      valid: false,
+      chatId: '',
+      reason: 'TELEGRAM_ADMIN_CHAT_ID is not configured in environment variables.',
+    };
+  }
+  if (!/^-\d+$/.test(cleaned)) {
+    return {
+      valid: false,
+      chatId: '',
+      reason:
+        'TELEGRAM_ADMIN_CHAT_ID must be a negative numeric Telegram group/supergroup ID (e.g. -1001234567890). Never use a positive customer ID.',
+    };
+  }
+  return { valid: true, chatId: cleaned };
+}
+
+function maskPhoneNumberForAdmin(phone?: string | null): string {
+  const clean = String(phone || '').replace(/\D/g, '');
+  if (clean.length < 4) return 'Not provided';
+  const last4 = clean.slice(-4);
+  return `+91-XXXXXX${last4}`;
+}
+
+function summarizeAddressForAdmin(address?: string | null): string {
+  const clean = String(address || '').trim();
+  if (!clean) return 'Not provided';
+  // Extract PIN code if present, and last locality/city segment without exposing full street/house numbers
+  const pinMatch = clean.match(/\b([1-9]\d{5})\b/);
+  const parts = clean
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const tail = parts.slice(-2).join(', ');
+  const summary = tail.length > 48 ? `${tail.slice(0, 48)}...` : tail;
+  if (pinMatch && !summary.includes(pinMatch[1])) {
+    return `${summary} (${pinMatch[1]})`;
+  }
+  return summary || 'Provided (Verified)';
+}
+
+/**
+ * Sends a deduplicated admin activity notification to the configured private Telegram admin group.
+ * Never exposes bot tokens, secrets, or unnecessary sensitive personal data.
+ */
+export async function sendAdminGroupNotification(params: {
+  eventType: AdminNotificationEntry['event_type'];
+  dedupKey: string;
+  text: string;
+  allowDuplicate?: boolean;
+}): Promise<{
+  ok: boolean;
+  skipped_duplicate?: boolean;
+  delivered_to_telegram: boolean;
+  status: string;
+  entry?: AdminNotificationEntry;
+}> {
+  const { eventType, dedupKey, text, allowDuplicate = false } = params;
+
+  if (!allowDuplicate && db.hasAdminNotificationBeenSent(dedupKey)) {
+    return {
+      ok: true,
+      skipped_duplicate: true,
+      delivered_to_telegram: false,
+      status: 'SKIPPED_DUPLICATE',
+    };
+  }
+
+  const adminChatValidation = validateAdminGroupChatId();
+  const token = CONFIG.TELEGRAM_BOT_TOKEN;
+  let delivered = false;
+  let status = 'LOGGED_LOCALLY';
+
+  if (!adminChatValidation.valid) {
+    status = `NOT_CONFIGURED (${adminChatValidation.reason})`;
+  } else if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
+    status = 'BOT_TOKEN_NOT_CONFIGURED';
+  } else {
+    try {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: adminChatValidation.chatId,
+          text,
+          disable_web_page_preview: true,
+        }),
+      });
+
+      if (response.ok) {
+        delivered = true;
+        status = 'DELIVERED_TO_ADMIN_GROUP';
+      } else {
+        const errBody = await response.text();
+        status = `TELEGRAM_HTTP_${response.status}`;
+        logger.warn('AdminNotifier', `Failed to send admin group message (${status})`, {
+          eventType,
+          status: response.status,
+          description: errBody.slice(0, 160),
+        });
+      }
+    } catch (err) {
+      status = 'NETWORK_ERROR';
+      logger.error('AdminNotifier', 'Network error sending admin group notification', {
+        eventType,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const entry: AdminNotificationEntry = {
+    id: crypto.randomUUID(),
+    dedup_key: dedupKey,
+    event_type: eventType,
+    text,
+    delivered_to_telegram: delivered,
+    telegram_status: status,
+    created_at: new Date().toISOString(),
+  };
+
+  db.markAdminNotificationSent(entry);
+
+  logger.info('AdminNotifier', `Admin activity notification recorded (${eventType})`, {
+    dedupKey,
+    delivered,
+    status,
+  });
+
+  return {
+    ok: delivered || !adminChatValidation.valid,
+    delivered_to_telegram: delivered,
+    status,
+    entry,
+  };
+}
+
+/**
+ * Server-side function to send a test message to the configured Telegram admin group.
+ */
+export async function sendTestMessageToAdminGroup(customNote?: string) {
+  const adminCheck = validateAdminGroupChatId();
+  const timestamp = new Date().toISOString();
+  const testText = [
+    '🔔 DIWALI BIGDEAL — ADMIN GROUP TEST NOTIFICATION',
+    '',
+    '✅ Server-side admin notification channel is active.',
+    `🌐 Service: DiwaliBigdeal Telegram Bot (100197-oqqb)`,
+    `🕒 Timestamp: ${timestamp}`,
+    customNote ? `📝 Note: ${String(customNote).slice(0, 120)}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const result = await sendAdminGroupNotification({
+    eventType: 'ADMIN_TEST',
+    dedupKey: `admin_test_${Date.now()}`,
+    text: testText,
+    allowDuplicate: true,
+  });
+
+  return {
+    ok: result.delivered_to_telegram,
+    admin_chat_configured: adminCheck.valid,
+    validation_message: adminCheck.reason || 'Valid private group chat ID format.',
+    delivery_status: result.status,
+    notification: result.entry,
+  };
+}
+
+export async function notifyAdminNewBotStart(params: {
+  customer: CustomerRecord;
+  username?: string | null;
+  referralApplied?: boolean;
+  referrer?: CustomerRecord | null;
+}) {
+  const { customer, username, referralApplied, referrer } = params;
+  const dedupKey = `bot_start_${customer.telegram_user_id}`;
+  const handle = username ? `@${username.replace(/^@/, '')}` : 'No username';
+
+  const lines = [
+    '🚀 NEW BOT START — DiwaliBigdeal',
+    '',
+    `👤 User ID: ${customer.telegram_user_id} (${handle})`,
+    `🔗 User Referral Code: ${customer.referral_code}`,
+    customer.referred_by
+      ? `🤝 Referred By Code: ${customer.referred_by}${
+          referralApplied && referrer
+            ? ` (Referrer Total Referrals: ${referrer.referral_count})`
+            : ''
+        }`
+      : '🤝 Referred By: Direct / Organic',
+    `🕒 Started At: ${new Date().toISOString()}`,
+  ];
+
+  return sendAdminGroupNotification({
+    eventType: 'BOT_START',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+export async function notifyAdminRegistrationSubmitted(customer: CustomerRecord) {
+  // Deduplicate based on user + normalized registration fingerprint so edits only notify if changed
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(`${customer.name || ''}|${customer.phone || ''}|${customer.address || ''}`)
+    .digest('hex')
+    .slice(0, 10);
+  const dedupKey = `reg_submit_${customer.telegram_user_id}_${fingerprint}`;
+
+  const lines = [
+    '📝 REGISTRATION DETAILS SUBMITTED — DiwaliBigdeal',
+    '',
+    `👤 Customer Name: ${customer.name || 'Not provided'}`,
+    `🆔 Telegram User ID: ${customer.telegram_user_id}`,
+    `📱 Mobile (Masked): ${maskPhoneNumberForAdmin(customer.phone)}`,
+    `📍 Location Summary: ${summarizeAddressForAdmin(customer.address)}`,
+    `🔗 Referral Code: ${customer.referral_code}`,
+    customer.referred_by ? `🤝 Referred By: ${customer.referred_by}` : null,
+    `🕒 Submitted At: ${new Date().toISOString()}`,
+  ].filter(Boolean);
+
+  return sendAdminGroupNotification({
+    eventType: 'REGISTRATION_SUBMITTED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+export async function notifyAdminVerifiedPayment(params: {
+  customer: CustomerRecord;
+  ticketNumber: string;
+  paymentId: string;
+  chargeId?: string;
+}) {
+  const { customer, ticketNumber, paymentId, chargeId } = params;
+  const dedupKey = `verified_payment_${paymentId}_${ticketNumber}`;
+
+  const lines = [
+    '💰 VERIFIED PAYMENT & TICKET ISSUED — DiwaliBigdeal',
+    '',
+    `🎫 Ticket ID: ${ticketNumber}`,
+    `✅ Payment Status: PAID (Server-Verified)`,
+    `💳 Payment ID: ${paymentId}`,
+    chargeId ? `🧾 Charge Ref: ${chargeId}` : null,
+    `👤 Customer Name: ${customer.name || 'Customer'}`,
+    `🆔 Telegram User ID: ${customer.telegram_user_id}`,
+    `📱 Mobile (Masked): ${maskPhoneNumberForAdmin(customer.phone)}`,
+    `🔗 Customer Referral Code: ${customer.referral_code} (Referrals: ${customer.referral_count || 0})`,
+    customer.referred_by ? `🤝 Referred By: ${customer.referred_by}` : null,
+    `🕒 Confirmed At: ${new Date().toISOString()}`,
+  ].filter(Boolean);
+
+  return sendAdminGroupNotification({
+    eventType: 'PAYMENT_VERIFIED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
 }
 
 function timingSafeCompareStrings(aStr: string, bStr: string): boolean {
@@ -84,12 +357,14 @@ export async function getSafeTelegramWebhookDiagnostics() {
     CONFIG.TELEGRAM_WEBHOOK_SECRET &&
       CONFIG.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
   );
+  const adminGroupCheck = validateAdminGroupChatId();
 
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
     return {
       ok: false,
       telegram_bot_token_configured: false,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       expected_webhook_url: expectedUrl,
       webhook_registered: false,
       url_matches_production: false,
@@ -115,6 +390,7 @@ export async function getSafeTelegramWebhookDiagnostics() {
       ok: Boolean(whData?.ok),
       telegram_bot_token_configured: true,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       bot: botInfo
         ? {
             id: botInfo.id,
@@ -140,6 +416,7 @@ export async function getSafeTelegramWebhookDiagnostics() {
       ok: false,
       telegram_bot_token_configured: true,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       expected_webhook_url: expectedUrl,
       webhook_registered: false,
       url_matches_production: false,
@@ -148,10 +425,6 @@ export async function getSafeTelegramWebhookDiagnostics() {
   }
 }
 
-/**
- * Registers the production webhook URL (`https://100197-oqqb.vercel.app/api/telegram/webhook`),
- * allowed_updates (`message`, `callback_query`, `pre_checkout_query`), and bot commands with Telegram.
- */
 export async function ensureTelegramWebhookRegistered(forceSync = false) {
   const token = CONFIG.TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {

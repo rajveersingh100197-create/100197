@@ -13,6 +13,8 @@ import {
   getSafeTelegramWebhookDiagnostics,
   MAIN_MENU_INLINE_KEYBOARD,
   sendTelegramMessage,
+  sendTestMessageToAdminGroup,
+  validateAdminGroupChatId,
   verifyTelegramWebhookSecret,
 } from './telegramService';
 import {
@@ -331,24 +333,47 @@ app.get('/api/payment/checkout/:paymentId', (req: Request, res: Response) => {
 app.get('/api/admin/overview', (_req: Request, res: Response) => {
   const customers = db.listAllCustomers();
   const logs = logger.getRecentLogs(80);
+  const adminNotifications = db.getRecentAdminNotifications(50);
   const configStatus = getPublicConfigStatus();
+  const adminCheck = validateAdminGroupChatId();
 
   const stats = {
     totalCustomers: customers.length,
     confirmedTickets: customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length,
     pendingPayments: customers.filter((c) => c.payment_status === 'PENDING').length,
+    totalReferrals: customers.reduce((sum, c) => sum + (c.referral_count || 0), 0),
     totalStarsCollected:
       customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length * 100,
   };
 
   return res.json({
     ok: true,
-    config: configStatus,
+    config: {
+      ...configStatus,
+      adminGroupValidationMessage: adminCheck.reason || 'Configured & Valid',
+    },
     stats,
     customers,
+    adminNotifications,
     logs,
     sqlSchema: db.getSQLSchemaDDL(),
   });
+});
+
+app.post('/api/admin/test-notification', async (req: Request, res: Response) => {
+  try {
+    const { note } = (req.body || {}) as { note?: string };
+    const result = await sendTestMessageToAdminGroup(note);
+    return res.status(200).json({
+      ...result,
+      adminNotifications: db.getRecentAdminNotifications(50),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to send test admin notification',
+    });
+  }
 });
 
 app.get('/api/admin/chat/:chatId', (req: Request, res: Response) => {
@@ -436,16 +461,24 @@ app.post('/api/admin/reset-customer', async (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, error: 'telegram_user_id required' });
   }
   db.resetCustomerForTesting(String(telegram_user_id));
-  const customer = db.getOrCreateCustomer(String(telegram_user_id), String(telegram_user_id));
+  const { customer } = db.getOrCreateCustomer(String(telegram_user_id), String(telegram_user_id));
   await sendTelegramMessage(
     String(telegram_user_id),
     [
-      '🪔 Welcome to DiwaliBigdeal!',
+      '🪔 स्वागत है DiwaliBigdeal में!',
       '',
-      'Entry Fee: 100 Telegram Stars ⭐️',
-      'Win Mahindra Thar ROXX, Double-Door Refrigerator, Smart LED TV & Multiple Cash Prizes!',
+      '🎉 इस दिवाली DiwaliBigdeal से जुड़ें और शानदार इनाम जीतने का मौका पाएँ!',
       '',
-      'Please choose an option below:',
+      '🏆 पहला इनाम: Mahindra Thar ROXX',
+      '🥈 दूसरा इनाम: Double-Door Refrigerator',
+      '🥉 तीसरा इनाम: Smart LED TV',
+      '💰 इसके अलावा जीतें Multiple Cash Prizes!',
+      '',
+      '🎟️ Entry Fee: ₹199',
+      '📅 Winner Announcement: 8 November 2026',
+      '⏰ Time: रात 11:59 बजे (IST)',
+      '',
+      '👇 आगे बढ़ने के लिए नीचे दिए गए विकल्प चुनें:',
     ].join('\n'),
     MAIN_MENU_INLINE_KEYBOARD
   );

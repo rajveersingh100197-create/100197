@@ -16,6 +16,8 @@ import {
   answerTelegramCallbackQuery,
   answerTelegramPreCheckoutQuery,
   MAIN_MENU_INLINE_KEYBOARD,
+  notifyAdminNewBotStart,
+  notifyAdminRegistrationSubmitted,
   sendTelegramMessage,
   sendTelegramStarsInvoice,
 } from './telegramService';
@@ -23,6 +25,24 @@ import {
   createPaymentOrderForCustomer,
   processVerifiedPaymentWebhook,
 } from './paymentService';
+
+export function extractReferralCodeFromText(rawText: string): string | null {
+  const trimmed = String(rawText || '').trim();
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2) {
+    const cmd = parts[0].split('@')[0].toLowerCase();
+    if (cmd === '/start' || cmd === '/join' || cmd === '/enter') {
+      const arg = parts[1].trim().toUpperCase();
+      if (/^(REF-[A-Z0-9]{4,12}|[A-Z0-9]{4,12})$/.test(arg)) {
+        return arg.startsWith('REF-') ? arg : `REF-${arg}`;
+      }
+    }
+  }
+  if (/^REF-[A-Z0-9]{4,12}$/i.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  return null;
+}
 
 export function validateIndianMobileNumber(input: string): {
   valid: boolean;
@@ -131,7 +151,13 @@ export const BOT_MESSAGES = {
       '✅ Payment सफल होते ही आपका Unique Ticket Number तुरंत जारी कर दिया जाएगा।',
     ].join('\n'),
 
-  myTicketConfirmed: (ticketNumber: string, name: string, phone: string) =>
+  myTicketConfirmed: (
+    ticketNumber: string,
+    name: string,
+    phone: string,
+    referralCode?: string,
+    referralCount?: number
+  ) =>
     [
       '🎫 मेरा टिकट | MY CONFIRMED TICKET',
       '',
@@ -139,13 +165,16 @@ export const BOT_MESSAGES = {
       '',
       `👤 नाम (Name): ${name}`,
       `📱 मोबाइल (Mobile): ${phone}`,
+      referralCode ? `🔗 Referral Code: ${referralCode} (Referrals: ${referralCount ?? 0})` : null,
       '',
       '🎟️ Entry Fee: ₹199',
       '✅ Status: CONFIRMED (पक्का)',
       '',
       '📅 Winner Announcement: 8 November 2026',
       '⏰ Time: रात 11:59 बजे (IST)',
-    ].join('\n'),
+    ]
+      .filter((line) => line !== null)
+      .join('\n'),
 
   myTicketNotFound: () =>
     [
@@ -278,7 +307,9 @@ async function handleMyTicketTrigger(customer: CustomerRecord) {
       BOT_MESSAGES.myTicketConfirmed(
         customer.ticket_number,
         customer.name || 'Customer',
-        customer.phone || ''
+        customer.phone || '',
+        customer.referral_code,
+        customer.referral_count
       ),
       MAIN_MENU_INLINE_KEYBOARD
     );
@@ -365,9 +396,10 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     const sp = msg.successful_payment!;
     const userId = String(msg.from?.id || msg.chat.id);
     const chatId = String(msg.chat.id);
+    const username = msg.from?.username || null;
     const paymentId = sp.invoice_payload;
 
-    db.getOrCreateCustomer(userId, chatId);
+    db.getOrCreateCustomer(userId, chatId, username);
 
     if (sp.currency !== 'XTR' || Number(sp.total_amount) !== 100) {
       logger.security(
@@ -425,7 +457,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
 
     await answerTelegramCallbackQuery(cb.id);
 
-    let customer = db.getOrCreateCustomer(userId, chatId);
+    let { customer } = db.getOrCreateCustomer(userId, chatId, cb.from?.username || null);
 
     if (data === 'menu_join_199') {
       await handleJoinEntryTrigger(customer);
@@ -498,7 +530,18 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       direction: 'user',
     });
 
-    let customer = db.getOrCreateCustomer(userId, chatId);
+    const username = msg.from?.username || null;
+    let { customer } = db.getOrCreateCustomer(userId, chatId, username);
+
+    const referralCodeCandidate = extractReferralCodeFromText(text);
+    let referralResult: { applied: boolean; referrer: CustomerRecord | null } = {
+      applied: false,
+      referrer: null,
+    };
+    if (referralCodeCandidate) {
+      referralResult = db.applyReferralCodeOnce(userId, referralCodeCandidate);
+      customer = db.getCustomerByUserId(userId) || customer;
+    }
 
     if (
       command === '/start' ||
@@ -508,6 +551,14 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       text.toLowerCase() === 'hi' ||
       text.toLowerCase() === 'hello'
     ) {
+      if (command === '/start') {
+        await notifyAdminNewBotStart({
+          customer,
+          username,
+          referralApplied: referralResult.applied,
+          referrer: referralResult.referrer,
+        });
+      }
       await sendTelegramMessage(
         chatId,
         BOT_MESSAGES.mainMenuGreeting(),
@@ -607,6 +658,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
           address: text,
           conversation_state: ConversationState.WAITING_FOR_CONFIRMATION,
         });
+        await notifyAdminRegistrationSubmitted(customer);
         await sendConfirmationScreen(customer);
         return customer;
       }

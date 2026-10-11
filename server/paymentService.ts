@@ -17,6 +17,7 @@ import { issueVerifiedTicket } from './ticketGenerator';
 import {
   createTelegramStarsInvoiceLink,
   MAIN_MENU_INLINE_KEYBOARD,
+  notifyAdminVerifiedPayment,
   sendTelegramMessage,
 } from './telegramService';
 
@@ -204,6 +205,13 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
       successMessage,
       MAIN_MENU_INLINE_KEYBOARD
     );
+
+    await notifyAdminVerifiedPayment({
+      customer: issuance.customer,
+      ticketNumber: issuance.ticketNumber,
+      paymentId,
+      chargeId: telegramPaymentChargeId,
+    });
 
     logger.info('PaymentVerification', `Sent Telegram confirmation for ticket ${issuance.ticketNumber}`, {
       telegram_user_id: issuance.customer.telegram_user_id,

@@ -21,6 +21,7 @@ export const CONFIG = {
   PRIZE_ANNOUNCEMENT_TIME: '11:59 PM IST',
   TELEGRAM_BOT_TOKEN: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
   TELEGRAM_WEBHOOK_SECRET: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
+  TELEGRAM_ADMIN_CHAT_ID: (process.env.TELEGRAM_ADMIN_CHAT_ID || '').trim(),
   PAYMENT_PROVIDER: 'telegram_stars',
   PAYMENT_WEBHOOK_SECRET: (process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026').trim(),
   DATABASE_PATH: process.env.DATABASE_PATH || './data/diwalibigdeal.sqlite',
@@ -41,6 +42,11 @@ export function getPublicConfigStatus() {
     telegramWebhookSecretConfigured: Boolean(
       CONFIG.TELEGRAM_WEBHOOK_SECRET &&
         CONFIG.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
+    ),
+    telegramAdminChatConfigured: Boolean(
+      CONFIG.TELEGRAM_ADMIN_CHAT_ID &&
+        CONFIG.TELEGRAM_ADMIN_CHAT_ID !== 'YOUR_PRIVATE_ADMIN_GROUP_CHAT_ID' &&
+        /^-\d+$/.test(CONFIG.TELEGRAM_ADMIN_CHAT_ID)
     ),
     paymentProvider: 'telegram_stars',
     paymentCredentialsConfigured: Boolean(

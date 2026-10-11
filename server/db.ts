@@ -5,33 +5,28 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { ConversationState, CustomerRecord, OutgoingBotMessage, PaymentStatus } from './types';
 import { CONFIG } from './config';
 import { logger } from './logger';
 
-/**
- * Production-ready Database Layer with automatic SQLite (node:sqlite) + JSON fallback
- * for serverless (Vercel) and local environments.
- *
- * Schema fields required by specification:
- * - telegram_user_id
- * - telegram_chat_id
- * - name
- * - phone
- * - address
- * - conversation_state
- * - payment_id
- * - payment_status
- * - payment_amount
- * - ticket_number
- * - created_at
- * - updated_at
- */
+export interface AdminNotificationEntry {
+  id: string;
+  dedup_key: string;
+  event_type: 'BOT_START' | 'REGISTRATION_SUBMITTED' | 'PAYMENT_VERIFIED' | 'ADMIN_TEST';
+  text: string;
+  delivered_to_telegram: boolean;
+  telegram_status: string;
+  created_at: string;
+}
 
 interface DatabaseStorageSnapshot {
   customers: Record<string, CustomerRecord>;
   ticketSequence: number;
   processedWebhooks: Record<string, string>; // payment_id -> ticket_number
+  processedAdminNotifications: Record<string, string>; // dedup_key -> ISO timestamp
+  processedReferrals: Record<string, string>; // referred_user_id -> referrer_code
+  adminNotifications: AdminNotificationEntry[];
   chatHistories: Record<string, OutgoingBotMessage[]>;
 }
 
@@ -41,11 +36,24 @@ const DATA_DIR =
     : path.resolve(process.cwd(), 'data');
 const JSON_DB_FILE = path.join(DATA_DIR, 'diwalibigdeal_store.json');
 
+export function generateReferralCode(telegramUserId: string): string {
+  const hash = crypto
+    .createHash('sha256')
+    .update(`diwalibigdeal_ref_${telegramUserId}`)
+    .digest('hex')
+    .slice(0, 6)
+    .toUpperCase();
+  return `REF-${hash}`;
+}
+
 class DatabaseManager {
   private store: DatabaseStorageSnapshot = {
     customers: {},
     ticketSequence: 0,
     processedWebhooks: {},
+    processedAdminNotifications: {},
+    processedReferrals: {},
+    adminNotifications: [],
     chatHistories: {},
   };
 
@@ -65,8 +73,26 @@ class DatabaseManager {
           customers: parsed.customers || {},
           ticketSequence: typeof parsed.ticketSequence === 'number' ? parsed.ticketSequence : 0,
           processedWebhooks: parsed.processedWebhooks || {},
+          processedAdminNotifications: parsed.processedAdminNotifications || {},
+          processedReferrals: parsed.processedReferrals || {},
+          adminNotifications: Array.isArray(parsed.adminNotifications)
+            ? parsed.adminNotifications
+            : [],
           chatHistories: parsed.chatHistories || {},
         };
+        // Ensure existing customer records have referral_code populated
+        for (const uid of Object.keys(this.store.customers)) {
+          const c = this.store.customers[uid];
+          if (!c.referral_code) {
+            c.referral_code = generateReferralCode(uid);
+          }
+          if (typeof c.referral_count !== 'number') {
+            c.referral_count = 0;
+          }
+          if (c.referred_by === undefined) {
+            c.referred_by = null;
+          }
+        }
         logger.info('Database', 'Loaded persistent database snapshot from disk', {
           customerCount: Object.keys(this.store.customers).length,
           ticketSequence: this.store.ticketSequence,
@@ -90,6 +116,7 @@ class DatabaseManager {
     const demo1: CustomerRecord = {
       telegram_user_id: '918820144',
       telegram_chat_id: '918820144',
+      username: 'aarav_sharma',
       name: 'Aarav Sharma',
       phone: '9876543210',
       address: 'Flat 402, Lotus Enclave, Indiranagar, Bengaluru, Karnataka - 560038',
@@ -98,6 +125,9 @@ class DatabaseManager {
       payment_status: PaymentStatus.PAID,
       payment_amount: CONFIG.CAMPAIGN_ENTRY_FEE,
       ticket_number: 'DB2026-000001',
+      referral_code: generateReferralCode('918820144'),
+      referred_by: null,
+      referral_count: 1,
       created_at: now,
       updated_at: recent,
     };
@@ -105,6 +135,7 @@ class DatabaseManager {
     const demo2: CustomerRecord = {
       telegram_user_id: '917451902',
       telegram_chat_id: '917451902',
+      username: 'priya_nair',
       name: 'Priya Nair',
       phone: '9820112233',
       address: 'B-18, Shanti Niketan, Bandra West, Mumbai, Maharashtra - 400050',
@@ -113,6 +144,9 @@ class DatabaseManager {
       payment_status: PaymentStatus.PENDING,
       payment_amount: CONFIG.CAMPAIGN_ENTRY_FEE,
       ticket_number: null,
+      referral_code: generateReferralCode('917451902'),
+      referred_by: demo1.referral_code,
+      referral_count: 0,
       created_at: recent,
       updated_at: recent,
     };
@@ -121,6 +155,7 @@ class DatabaseManager {
     this.store.customers[demo2.telegram_user_id] = demo2;
     this.store.ticketSequence = 1;
     this.store.processedWebhooks[demo1.payment_id!] = demo1.ticket_number!;
+    this.store.processedReferrals[demo2.telegram_user_id] = demo1.referral_code;
   }
 
   private persist() {
@@ -130,30 +165,46 @@ class DatabaseManager {
       }
       fs.writeFileSync(JSON_DB_FILE, JSON.stringify(this.store, null, 2), 'utf-8');
     } catch (err) {
-      // Safe fallback in read-only serverless container
       logger.warn('Database', 'Could not write snapshot to disk', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
 
-  public getOrCreateCustomer(telegramUserId: string, telegramChatId: string): CustomerRecord {
+  public getOrCreateCustomer(
+    telegramUserId: string,
+    telegramChatId: string,
+    username?: string | null
+  ): { customer: CustomerRecord; isNew: boolean } {
     const uid = String(telegramUserId);
     const cid = String(telegramChatId);
     const existing = this.store.customers[uid];
     if (existing) {
+      let changed = false;
       if (existing.telegram_chat_id !== cid) {
         existing.telegram_chat_id = cid;
+        changed = true;
+      }
+      if (username && existing.username !== username) {
+        existing.username = username;
+        changed = true;
+      }
+      if (!existing.referral_code) {
+        existing.referral_code = generateReferralCode(uid);
+        changed = true;
+      }
+      if (changed) {
         existing.updated_at = new Date().toISOString();
         this.persist();
       }
-      return { ...existing };
+      return { customer: { ...existing }, isNew: false };
     }
 
     const now = new Date().toISOString();
     const record: CustomerRecord = {
       telegram_user_id: uid,
       telegram_chat_id: cid,
+      username: username || null,
       name: null,
       phone: null,
       address: null,
@@ -162,6 +213,9 @@ class DatabaseManager {
       payment_status: PaymentStatus.UNPAID,
       payment_amount: CONFIG.CAMPAIGN_ENTRY_FEE,
       ticket_number: null,
+      referral_code: generateReferralCode(uid),
+      referred_by: null,
+      referral_count: 0,
       created_at: now,
       updated_at: now,
     };
@@ -169,12 +223,91 @@ class DatabaseManager {
     this.store.customers[uid] = record;
     this.persist();
     logger.info('Database', `Created new customer record for Telegram ID ${uid}`);
-    return { ...record };
+    return { customer: { ...record }, isNew: true };
   }
 
   public getCustomerByUserId(telegramUserId: string): CustomerRecord | null {
     const rec = this.store.customers[String(telegramUserId)];
     return rec ? { ...rec } : null;
+  }
+
+  public getCustomerByReferralCode(referralCode: string): CustomerRecord | null {
+    const clean = String(referralCode || '').trim().toUpperCase();
+    if (!clean) return null;
+    for (const key of Object.keys(this.store.customers)) {
+      const cust = this.store.customers[key];
+      if (cust.referral_code && cust.referral_code.toUpperCase() === clean) {
+        return { ...cust };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Atomically applies a referral code to a user once and prevents self-referrals
+   * and duplicate referral counts.
+   */
+  public applyReferralCodeOnce(
+    referredUserId: string,
+    rawReferralCode?: string | null
+  ): { applied: boolean; referrer: CustomerRecord | null; reason?: string } {
+    const uid = String(referredUserId);
+    const code = String(rawReferralCode || '').trim().toUpperCase();
+    if (!code) {
+      return { applied: false, referrer: null, reason: 'empty_code' };
+    }
+
+    if (this.store.processedReferrals[uid]) {
+      return { applied: false, referrer: null, reason: 'already_referred' };
+    }
+
+    const referredCustomer = this.store.customers[uid];
+    if (!referredCustomer) {
+      return { applied: false, referrer: null, reason: 'user_not_found' };
+    }
+
+    if (referredCustomer.referred_by) {
+      return { applied: false, referrer: null, reason: 'already_has_referrer' };
+    }
+
+    const referrer = this.getCustomerByReferralCode(code);
+    if (!referrer) {
+      return { applied: false, referrer: null, reason: 'invalid_referral_code' };
+    }
+
+    if (referrer.telegram_user_id === uid) {
+      return { applied: false, referrer: null, reason: 'self_referral_not_allowed' };
+    }
+
+    const now = new Date().toISOString();
+    referredCustomer.referred_by = referrer.referral_code;
+    referredCustomer.updated_at = now;
+
+    const referrerRecord = this.store.customers[referrer.telegram_user_id];
+    referrerRecord.referral_count = (referrerRecord.referral_count || 0) + 1;
+    referrerRecord.updated_at = now;
+
+    this.store.processedReferrals[uid] = referrer.referral_code;
+    this.persist();
+
+    return { applied: true, referrer: { ...referrerRecord } };
+  }
+
+  public hasAdminNotificationBeenSent(dedupKey: string): boolean {
+    return Boolean(this.store.processedAdminNotifications[dedupKey]);
+  }
+
+  public markAdminNotificationSent(entry: AdminNotificationEntry) {
+    this.store.processedAdminNotifications[entry.dedup_key] = entry.created_at;
+    this.store.adminNotifications.unshift(entry);
+    if (this.store.adminNotifications.length > 100) {
+      this.store.adminNotifications = this.store.adminNotifications.slice(0, 100);
+    }
+    this.persist();
+  }
+
+  public getRecentAdminNotifications(limit = 50): AdminNotificationEntry[] {
+    return (this.store.adminNotifications || []).slice(0, limit);
   }
 
   public getCustomerByPaymentId(paymentId: string): CustomerRecord | null {
@@ -203,6 +336,7 @@ class DatabaseManager {
       Pick<
         CustomerRecord,
         | 'telegram_chat_id'
+        | 'username'
         | 'name'
         | 'phone'
         | 'address'
@@ -211,6 +345,9 @@ class DatabaseManager {
         | 'payment_status'
         | 'payment_amount'
         | 'ticket_number'
+        | 'referral_code'
+        | 'referred_by'
+        | 'referral_count'
       >
     >
   ): CustomerRecord {
@@ -231,9 +368,6 @@ class DatabaseManager {
     return { ...updated };
   }
 
-  /**
-   * Atomically increments the ticket sequence counter and ensures no duplicate ticket number ever exists.
-   */
   public allocateNextTicketNumber(): string {
     let candidate = '';
     do {
@@ -286,6 +420,12 @@ class DatabaseManager {
     const uid = String(telegramUserId);
     delete this.store.customers[uid];
     delete this.store.chatHistories[uid];
+    delete this.store.processedReferrals[uid];
+    for (const k of Object.keys(this.store.processedAdminNotifications)) {
+      if (k.includes(uid)) {
+        delete this.store.processedAdminNotifications[k];
+      }
+    }
     this.persist();
   }
 
@@ -294,6 +434,7 @@ class DatabaseManager {
 CREATE TABLE IF NOT EXISTS customers (
   telegram_user_id VARCHAR(64) PRIMARY KEY,
   telegram_chat_id VARCHAR(64) NOT NULL,
+  username VARCHAR(128),
   name VARCHAR(255),
   phone VARCHAR(32),
   address TEXT,
@@ -302,12 +443,16 @@ CREATE TABLE IF NOT EXISTS customers (
   payment_status VARCHAR(32) NOT NULL DEFAULT 'UNPAID',
   payment_amount INTEGER NOT NULL DEFAULT 100,
   ticket_number VARCHAR(32) UNIQUE,
+  referral_code VARCHAR(32) UNIQUE NOT NULL,
+  referred_by VARCHAR(32),
+  referral_count INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_payment_id ON customers(payment_id);
 CREATE INDEX IF NOT EXISTS idx_customers_ticket_number ON customers(ticket_number);
+CREATE INDEX IF NOT EXISTS idx_customers_referral_code ON customers(referral_code);
 CREATE INDEX IF NOT EXISTS idx_customers_state ON customers(conversation_state);`;
   }
 }
