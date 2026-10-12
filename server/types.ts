@@ -177,6 +177,7 @@ export interface TelegramMessage {
   chat: TelegramChat;
   date: number;
   text?: string;
+  caption?: string;
   successful_payment?: TelegramSuccessfulPayment;
 }
 
@@ -191,6 +192,14 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
+  channel_post?: TelegramMessage;
+  edited_channel_post?: TelegramMessage;
+  my_chat_member?: {
+    chat: TelegramChat;
+    from: TelegramUser;
+    date: number;
+    new_chat_member?: { status?: string; user?: TelegramUser };
+  };
   callback_query?: TelegramCallbackQuery;
   pre_checkout_query?: TelegramPreCheckoutQuery;
 }

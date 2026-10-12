@@ -11,7 +11,7 @@
     },
     {
       "source": "/api/telegram/status",
-      "destination": "/api/telegram/status"
+      "destination": "/api/telegram/webhook"
     },
     {
       "source": "/api/payment/webhook",

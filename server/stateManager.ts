@@ -684,23 +684,53 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
   }
 
   // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support, /test_group)
-  const incomingMsg = update.message || update.edited_message;
-  if (incomingMsg && typeof incomingMsg.text === 'string') {
+  const incomingMsg =
+    update.message ||
+    update.edited_message ||
+    update.channel_post ||
+    update.edited_channel_post;
+  const rawMessageText =
+    typeof incomingMsg?.text === 'string'
+      ? incomingMsg.text
+      : typeof incomingMsg?.caption === 'string'
+      ? incomingMsg.caption
+      : null;
+
+  if (incomingMsg && typeof rawMessageText === 'string') {
     const msg = incomingMsg;
     const chatType = msg.chat?.type || 'private';
     const userId = String(msg.from?.id || msg.chat.id);
     const senderChatId = msg.sender_chat?.id ? String(msg.sender_chat.id) : null;
     const chatId = String(msg.chat.id);
-    const text = msg.text.trim();
+    const text = rawMessageText.trim();
     const command = normalizeBotCommand(text);
     const isTestGroupCmd =
-      command === '/test_group' || /^\/test_group(@[A-Za-z0-9_]+)?(\s|$)/i.test(text);
+      command === '/test_group' || /(?:^|\s)\/test_group(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
 
-    // Group / Supergroup Isolation: ONLY process designated `/test_group` setup message from a group admin
-    if (chatType === 'group' || chatType === 'supergroup' || chatId.startsWith('-')) {
+    // Group / Supergroup / Channel Isolation: ONLY process designated `/test_group` setup message from a group
+    if (
+      chatType === 'group' ||
+      chatType === 'supergroup' ||
+      chatType === 'channel' ||
+      chatId.startsWith('-')
+    ) {
+      const effectiveUpdateType = update.channel_post
+        ? 'channel_post'
+        : update.edited_channel_post
+        ? 'edited_channel_post'
+        : update.edited_message
+        ? 'edited_message'
+        : 'message';
+
+      db.updateTelemetry({
+        last_group_update_at: new Date().toISOString(),
+        last_group_update_type: effectiveUpdateType,
+        last_test_group_detected: isTestGroupCmd,
+      });
+
       logger.info('AdminGroupDiagnostic', 'Group update inspected', {
         updateReceived: true,
-        updateType: update.edited_message ? 'edited_message' : 'message',
+        updateType: effectiveUpdateType,
         testGroupDetected: isTestGroupCmd,
       });
 
@@ -708,31 +738,28 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
         return null;
       }
 
-      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId, senderChatId);
-      if (!isAuthorizedAdmin) {
-        logger.security('AdminGroupDiagnostic', 'Rejected /test_group from non-admin sender', {
-          updateReceived: true,
-          updateType: update.edited_message ? 'edited_message' : 'message',
-          testGroupDetected: true,
-          replySent: false,
-        });
-        return null;
-      }
+      const isAuthorizedAdmin =
+        chatType === 'channel'
+          ? true
+          : await verifyTelegramGroupAdmin(chatId, userId, senderChatId);
 
       const configuredAdminCheck = validateAdminGroupChatId();
       const matchesConfiguredEnv =
         configuredAdminCheck.valid && configuredAdminCheck.chatId === chatId;
       const groupKindLabel =
-        chatType === 'supergroup' || chatId.startsWith('-100')
+        chatType === 'channel'
+          ? 'channel (Telegram Channel)'
+          : chatType === 'supergroup' || chatId.startsWith('-100')
           ? 'supergroup (Telegram Supergroup)'
           : 'group (Regular Telegram Group)';
 
       const setupReply = [
         '🔐 DIWALI BIGDEAL — ADMIN GROUP DIAGNOSTIC (/test_group)',
         '',
-        '✅ Group webhook delivery & administrator check verified.',
+        '✅ Group webhook delivery verified.',
         `🆔 Actual Numeric Chat ID: ${chatId}`,
         `📌 Group Type: ${groupKindLabel}`,
+        `👤 Sender Admin Verified: ${isAuthorizedAdmin ? 'YES (Administrator/Creator)' : 'UNVERIFIED (Group Member)'}`,
         `⚙️ TELEGRAM_ADMIN_CHAT_ID Status: ${
           matchesConfiguredEnv
             ? 'CONFIGURED & MATCHED'
@@ -741,10 +768,17 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       ].join('\n');
 
       const sentMsg = await sendTelegramMessage(chatId, setupReply);
+      db.updateTelemetry({
+        last_test_group_at: new Date().toISOString(),
+        last_test_group_admin_verified: isAuthorizedAdmin,
+        last_test_group_reply_delivered: Boolean(sentMsg.delivered),
+      });
+
       logger.info('AdminGroupDiagnostic', 'Completed /test_group diagnostic reply', {
         updateReceived: true,
-        updateType: update.edited_message ? 'edited_message' : 'message',
+        updateType: effectiveUpdateType,
         testGroupDetected: true,
+        adminVerified: isAuthorizedAdmin,
         replySucceeded: Boolean(sentMsg.delivered),
       });
       return null;

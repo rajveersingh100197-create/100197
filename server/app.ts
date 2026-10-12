@@ -134,6 +134,10 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
       process.env.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
     ) {
       if (!verifyTelegramWebhookSecret(secretHeader)) {
+        db.updateTelemetry({
+          last_auth_failure_at: new Date().toISOString(),
+          last_auth_failure_reason: secretHeader ? 'value_mismatch' : 'missing_header',
+        });
         logger.security(
           'TelegramWebhook',
           'Rejected unauthorized Telegram webhook request (invalid secret token)'
@@ -151,16 +155,50 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: 'Invalid Telegram Update payload' });
     }
 
+    const updateType = update.pre_checkout_query
+      ? 'pre_checkout_query'
+      : update.callback_query
+      ? 'callback_query'
+      : update.message?.successful_payment
+      ? 'successful_payment'
+      : update.channel_post
+      ? 'channel_post'
+      : update.edited_channel_post
+      ? 'edited_channel_post'
+      : update.my_chat_member
+      ? 'my_chat_member'
+      : update.edited_message
+      ? 'edited_message'
+      : update.message
+      ? 'message'
+      : 'unknown';
+
+    const prevTelemetry = db.getTelemetry();
+    db.updateTelemetry({
+      last_update_received_at: new Date().toISOString(),
+      last_update_id: update.update_id,
+      last_update_type: updateType,
+      total_updates_received: (prevTelemetry.total_updates_received || 0) + 1,
+    });
+
     logger.webhook('TelegramWebhook', `Received Telegram update_id=${update.update_id}`, {
-      hasMessage: Boolean(update.message),
+      updateType,
+      hasMessage: Boolean(
+        update.message || update.edited_message || update.channel_post || update.edited_channel_post
+      ),
       hasCallbackQuery: Boolean(update.callback_query),
       hasPreCheckoutQuery: Boolean(update.pre_checkout_query),
       hasSuccessfulPayment: Boolean(update.message?.successful_payment),
     });
 
     const customer = await handleTelegramUpdate(update);
+    const msgObj =
+      update.message ||
+      update.edited_message ||
+      update.channel_post ||
+      update.edited_channel_post;
     const chatId = String(
-      update.message?.chat.id ||
+      msgObj?.chat.id ||
         update.callback_query?.message?.chat.id ||
         update.callback_query?.from.id ||
         update.pre_checkout_query?.from.id ||
@@ -364,6 +402,7 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
     withdrawalRequests,
     adminNotifications,
     logs,
+    telemetry: db.getTelemetry(),
     sqlSchema: db.getSQLSchemaDDL(),
   });
 });

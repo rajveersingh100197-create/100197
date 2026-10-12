@@ -505,8 +505,17 @@ export async function getSafeTelegramWebhookDiagnostics() {
         : null,
       last_error_message: info.last_error_message || null,
       max_connections: info.max_connections ?? null,
-      allowed_updates: info.allowed_updates || ['message', 'callback_query', 'pre_checkout_query'],
+      allowed_updates: info.allowed_updates || [
+        'message',
+        'edited_message',
+        'channel_post',
+        'edited_channel_post',
+        'my_chat_member',
+        'callback_query',
+        'pre_checkout_query',
+      ],
       ip_address: info.ip_address || null,
+      telemetry: db.getTelemetry(),
     };
   } catch (err) {
     return {
@@ -518,9 +527,20 @@ export async function getSafeTelegramWebhookDiagnostics() {
       webhook_registered: false,
       url_matches_production: false,
       error: err instanceof Error ? err.message : 'Failed to reach Telegram Bot API',
+      telemetry: db.getTelemetry(),
     };
   }
 }
+
+const REQUIRED_ALLOWED_UPDATES = [
+  'message',
+  'edited_message',
+  'channel_post',
+  'edited_channel_post',
+  'my_chat_member',
+  'callback_query',
+  'pre_checkout_query',
+];
 
 export async function ensureTelegramWebhookRegistered(forceSync = false) {
   const token = CONFIG.TELEGRAM_BOT_TOKEN;
@@ -540,11 +560,19 @@ export async function ensureTelegramWebhookRegistered(forceSync = false) {
         currentDiag.last_error_message.includes('500') ||
         currentDiag.last_error_message.includes('Wrong response'));
 
+    const currentAllowed = Array.isArray(currentDiag.allowed_updates)
+      ? currentDiag.allowed_updates
+      : [];
+    const missingAllowedUpdates = REQUIRED_ALLOWED_UPDATES.some(
+      (u) => !currentAllowed.includes(u)
+    );
+
     const needsRegistration =
       forceSync ||
       !currentDiag.webhook_registered ||
       !currentDiag.url_matches_production ||
-      hasSecretMismatchError;
+      hasSecretMismatchError ||
+      missingAllowedUpdates;
 
     if (!needsRegistration) {
       return {
@@ -557,7 +585,7 @@ export async function ensureTelegramWebhookRegistered(forceSync = false) {
     const cleanSecret = sanitizeSecretToken(CONFIG.TELEGRAM_WEBHOOK_SECRET);
     const setWebhookPayload: Record<string, unknown> = {
       url: CONFIG.PRODUCTION_WEBHOOK_URL,
-      allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
+      allowed_updates: REQUIRED_ALLOWED_UPDATES,
       drop_pending_updates: false,
     };
 
@@ -655,17 +683,33 @@ export async function sendTelegramMessage(
 
       if (!response.ok) {
         const errBody = await response.text();
+        db.updateTelemetry({
+          last_send_message_status: `HTTP_${response.status}`,
+          last_send_message_at: new Date().toISOString(),
+          last_send_message_error: errBody.slice(0, 200),
+        });
         logger.warn('TelegramAPI', `Telegram sendMessage returned HTTP ${response.status}`, {
           status: response.status,
           description: errBody.slice(0, 200),
         });
       } else {
         delivered = true;
+        db.updateTelemetry({
+          last_send_message_status: 'OK_200',
+          last_send_message_at: new Date().toISOString(),
+          last_send_message_error: null,
+        });
         logger.info('TelegramAPI', 'Delivered outgoing Telegram reply message');
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      db.updateTelemetry({
+        last_send_message_status: 'NETWORK_ERROR',
+        last_send_message_at: new Date().toISOString(),
+        last_send_message_error: errMsg,
+      });
       logger.error('TelegramAPI', 'Failed to call Telegram Bot API sendMessage', {
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       });
     }
   } else {
@@ -862,8 +906,8 @@ export async function verifyTelegramGroupAdmin(
     return false;
   }
 
-  // Anonymous Group Admin: Telegram sets sender_chat.id === chat.id or from.id === 1087968824 (@GroupAnonymousBot)
-  if (scid && scid === cid) {
+  // Anonymous Group Admin or Channel Post: Telegram sets sender_chat.id or from.id === 1087968824 (@GroupAnonymousBot)
+  if (scid && scid.startsWith('-')) {
     return true;
   }
   if (uid === '1087968824' || uid === cid) {
@@ -890,6 +934,11 @@ export async function verifyTelegramGroupAdmin(
       }),
     });
     if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      logger.warn('AdminGroupDiagnostic', `Telegram getChatMember returned HTTP ${response.status}`, {
+        status: response.status,
+        description: errBody.slice(0, 200),
+      });
       return false;
     }
     const data = (await response.json()) as {
@@ -898,7 +947,10 @@ export async function verifyTelegramGroupAdmin(
     };
     const memberStatus = data?.result?.status;
     return memberStatus === 'creator' || memberStatus === 'administrator';
-  } catch {
+  } catch (err) {
+    logger.warn('AdminGroupDiagnostic', 'Failed to call Telegram getChatMember', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }

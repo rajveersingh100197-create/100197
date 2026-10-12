@@ -38,6 +38,24 @@ export interface AdminNotificationEntry {
   created_at: string;
 }
 
+export interface WebhookTelemetrySnapshot {
+  last_update_received_at: string | null;
+  last_update_id: number | null;
+  last_update_type: string | null;
+  last_send_message_status: string | null;
+  last_send_message_at: string | null;
+  last_send_message_error: string | null;
+  last_auth_failure_at: string | null;
+  last_auth_failure_reason: string | null;
+  last_group_update_at?: string | null;
+  last_group_update_type?: string | null;
+  last_test_group_detected?: boolean | null;
+  last_test_group_at?: string | null;
+  last_test_group_admin_verified?: boolean | null;
+  last_test_group_reply_delivered?: boolean | null;
+  total_updates_received: number;
+}
+
 interface DatabaseStorageSnapshot {
   customers: Record<string, CustomerRecord>;
   ticketSequence: number;
@@ -48,6 +66,7 @@ interface DatabaseStorageSnapshot {
   withdrawalRequests: Record<string, WithdrawalRequest>; // withdrawal_id -> WithdrawalRequest
   adminNotifications: AdminNotificationEntry[];
   chatHistories: Record<string, OutgoingBotMessage[]>;
+  webhookTelemetry: WebhookTelemetrySnapshot;
 }
 
 const DATA_DIR =
@@ -116,6 +135,17 @@ class DatabaseManager {
     withdrawalRequests: {},
     adminNotifications: [],
     chatHistories: {},
+    webhookTelemetry: {
+      last_update_received_at: null,
+      last_update_id: null,
+      last_update_type: null,
+      last_send_message_status: null,
+      last_send_message_at: null,
+      last_send_message_error: null,
+      last_auth_failure_at: null,
+      last_auth_failure_reason: null,
+      total_updates_received: 0,
+    },
   };
 
   constructor() {
@@ -142,6 +172,17 @@ class DatabaseManager {
             ? parsed.adminNotifications
             : [],
           chatHistories: parsed.chatHistories || {},
+          webhookTelemetry: parsed.webhookTelemetry || {
+            last_update_received_at: null,
+            last_update_id: null,
+            last_update_type: null,
+            last_send_message_status: null,
+            last_send_message_at: null,
+            last_send_message_error: null,
+            last_auth_failure_at: null,
+            last_auth_failure_reason: null,
+            total_updates_received: 0,
+          },
         };
         for (const uid of Object.keys(this.store.customers)) {
           const c = this.store.customers[uid];
@@ -248,6 +289,28 @@ class DatabaseManager {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  public updateTelemetry(patch: Partial<WebhookTelemetrySnapshot>) {
+    this.store.webhookTelemetry = {
+      ...(this.store.webhookTelemetry || {
+        last_update_received_at: null,
+        last_update_id: null,
+        last_update_type: null,
+        last_send_message_status: null,
+        last_send_message_at: null,
+        last_send_message_error: null,
+        last_auth_failure_at: null,
+        last_auth_failure_reason: null,
+        total_updates_received: 0,
+      }),
+      ...patch,
+    };
+    this.persist();
+  }
+
+  public getTelemetry(): WebhookTelemetrySnapshot {
+    return this.store.webhookTelemetry;
   }
 
   public getOrCreateCustomer(

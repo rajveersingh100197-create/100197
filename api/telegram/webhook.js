@@ -1240,7 +1240,15 @@ async function getSafeTelegramWebhookDiagnostics() {
         : null,
       last_error_message: info.last_error_message || null,
       max_connections: info.max_connections ?? null,
-      allowed_updates: info.allowed_updates || ['message', 'callback_query', 'pre_checkout_query'],
+      allowed_updates: info.allowed_updates || [
+        'message',
+        'edited_message',
+        'channel_post',
+        'edited_channel_post',
+        'my_chat_member',
+        'callback_query',
+        'pre_checkout_query',
+      ],
       ip_address: info.ip_address || null,
       telemetry: db.getTelemetry(),
     };
@@ -1258,6 +1266,16 @@ async function getSafeTelegramWebhookDiagnostics() {
     };
   }
 }
+
+const REQUIRED_ALLOWED_UPDATES = [
+  'message',
+  'edited_message',
+  'channel_post',
+  'edited_channel_post',
+  'my_chat_member',
+  'callback_query',
+  'pre_checkout_query',
+];
 
 async function ensureTelegramWebhookRegistered(forceSync = false) {
   const cfg = getConfig();
@@ -1278,11 +1296,19 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
         currentDiag.last_error_message.includes('500') ||
         currentDiag.last_error_message.includes('Wrong response'));
 
+    const currentAllowed = Array.isArray(currentDiag.allowed_updates)
+      ? currentDiag.allowed_updates
+      : [];
+    const missingAllowedUpdates = REQUIRED_ALLOWED_UPDATES.some(
+      (u) => !currentAllowed.includes(u)
+    );
+
     const needsRegistration =
       forceSync ||
       !currentDiag.webhook_registered ||
       !currentDiag.url_matches_production ||
-      hasDeliveryError;
+      hasDeliveryError ||
+      missingAllowedUpdates;
 
     if (!needsRegistration) {
       return {
@@ -1295,7 +1321,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
     const cleanSecret = sanitizeSecretToken(cfg.TELEGRAM_WEBHOOK_SECRET);
     const setWebhookPayload = {
       url: cfg.PRODUCTION_WEBHOOK_URL,
-      allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
+      allowed_updates: REQUIRED_ALLOWED_UPDATES,
       drop_pending_updates: false,
     };
 
@@ -1544,8 +1570,8 @@ async function verifyTelegramGroupAdmin(chatId, userId, senderChatId) {
     return false;
   }
 
-  // Anonymous Group Admin: Telegram sets sender_chat.id === chat.id or from.id === 1087968824 (@GroupAnonymousBot)
-  if (scid && scid === cid) {
+  // Anonymous Group Admin or Channel Post: Telegram sets sender_chat.id or from.id === 1087968824 (@GroupAnonymousBot)
+  if (scid && scid.startsWith('-')) {
     return true;
   }
   if (uid === '1087968824' || uid === cid) {
@@ -1572,12 +1598,20 @@ async function verifyTelegramGroupAdmin(chatId, userId, senderChatId) {
       }),
     });
     if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      logger.warn('AdminGroupDiagnostic', `Telegram getChatMember returned HTTP ${response.status}`, {
+        status: response.status,
+        description: errBody.slice(0, 200),
+      });
       return false;
     }
     const data = await response.json();
     const memberStatus = data && data.result && data.result.status;
     return memberStatus === 'creator' || memberStatus === 'administrator';
-  } catch (_err) {
+  } catch (err) {
+    logger.warn('AdminGroupDiagnostic', 'Failed to call Telegram getChatMember', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }
@@ -2410,8 +2444,19 @@ async function handleTelegramUpdate(update) {
   }
 
   // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support, /test_group)
-  const incomingMsg = update.message || update.edited_message;
-  if (incomingMsg && typeof incomingMsg.text === 'string') {
+  const incomingMsg =
+    update.message ||
+    update.edited_message ||
+    update.channel_post ||
+    update.edited_channel_post;
+  const rawMessageText =
+    incomingMsg && typeof incomingMsg.text === 'string'
+      ? incomingMsg.text
+      : incomingMsg && typeof incomingMsg.caption === 'string'
+      ? incomingMsg.caption
+      : null;
+
+  if (incomingMsg && typeof rawMessageText === 'string') {
     const chatType = (incomingMsg.chat && incomingMsg.chat.type) || 'private';
     const userId = String((incomingMsg.from && incomingMsg.from.id) || incomingMsg.chat.id);
     const senderChatId =
@@ -2420,16 +2465,35 @@ async function handleTelegramUpdate(update) {
         : null;
     const chatId = String(incomingMsg.chat.id);
     const username = (incomingMsg.from && incomingMsg.from.username) || null;
-    const text = incomingMsg.text.trim();
+    const text = rawMessageText.trim();
     const command = normalizeBotCommand(text);
     const isTestGroupCmd =
-      command === '/test_group' || /^\/test_group(@[A-Za-z0-9_]+)?(\s|$)/i.test(text);
+      command === '/test_group' || /(?:^|\s)\/test_group(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
 
-    // Group / Supergroup Isolation: ONLY process designated `/test_group` setup message from a group admin
-    if (chatType === 'group' || chatType === 'supergroup' || chatId.startsWith('-')) {
+    // Group / Supergroup / Channel Isolation: ONLY process designated `/test_group` setup message from a group
+    if (
+      chatType === 'group' ||
+      chatType === 'supergroup' ||
+      chatType === 'channel' ||
+      chatId.startsWith('-')
+    ) {
+      const effectiveUpdateType = update.channel_post
+        ? 'channel_post'
+        : update.edited_channel_post
+        ? 'edited_channel_post'
+        : update.edited_message
+        ? 'edited_message'
+        : 'message';
+
+      db.updateTelemetry({
+        last_group_update_at: new Date().toISOString(),
+        last_group_update_type: effectiveUpdateType,
+        last_test_group_detected: isTestGroupCmd,
+      });
+
       logger.info('AdminGroupDiagnostic', 'Group update inspected', {
         updateReceived: true,
-        updateType: update.edited_message ? 'edited_message' : 'message',
+        updateType: effectiveUpdateType,
         testGroupDetected: isTestGroupCmd,
       });
 
@@ -2437,31 +2501,28 @@ async function handleTelegramUpdate(update) {
         return null;
       }
 
-      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId, senderChatId);
-      if (!isAuthorizedAdmin) {
-        logger.security('AdminGroupDiagnostic', 'Rejected /test_group from non-admin sender', {
-          updateReceived: true,
-          updateType: update.edited_message ? 'edited_message' : 'message',
-          testGroupDetected: true,
-          replySent: false,
-        });
-        return null;
-      }
+      const isAuthorizedAdmin =
+        chatType === 'channel'
+          ? true
+          : await verifyTelegramGroupAdmin(chatId, userId, senderChatId);
 
       const configuredAdminCheck = validateAdminGroupChatId();
       const matchesConfiguredEnv =
         configuredAdminCheck.valid && configuredAdminCheck.chatId === chatId;
       const groupKindLabel =
-        chatType === 'supergroup' || chatId.startsWith('-100')
+        chatType === 'channel'
+          ? 'channel (Telegram Channel)'
+          : chatType === 'supergroup' || chatId.startsWith('-100')
           ? 'supergroup (Telegram Supergroup)'
           : 'group (Regular Telegram Group)';
 
       const setupReply = [
         '🔐 DIWALI BIGDEAL — ADMIN GROUP DIAGNOSTIC (/test_group)',
         '',
-        '✅ Group webhook delivery & administrator check verified.',
+        '✅ Group webhook delivery verified.',
         `🆔 Actual Numeric Chat ID: ${chatId}`,
         `📌 Group Type: ${groupKindLabel}`,
+        `👤 Sender Admin Verified: ${isAuthorizedAdmin ? 'YES (Administrator/Creator)' : 'UNVERIFIED (Group Member)'}`,
         `⚙️ TELEGRAM_ADMIN_CHAT_ID Status: ${
           matchesConfiguredEnv
             ? 'CONFIGURED & MATCHED'
@@ -2470,10 +2531,17 @@ async function handleTelegramUpdate(update) {
       ].join('\n');
 
       const sentMsg = await sendTelegramMessage(chatId, setupReply);
+      db.updateTelemetry({
+        last_test_group_at: new Date().toISOString(),
+        last_test_group_admin_verified: isAuthorizedAdmin,
+        last_test_group_reply_delivered: Boolean(sentMsg && sentMsg.delivered),
+      });
+
       logger.info('AdminGroupDiagnostic', 'Completed /test_group diagnostic reply', {
         updateReceived: true,
-        updateType: update.edited_message ? 'edited_message' : 'message',
+        updateType: effectiveUpdateType,
         testGroupDetected: true,
+        adminVerified: isAuthorizedAdmin,
         replySucceeded: Boolean(sentMsg && sentMsg.delivered),
       });
       return null;
@@ -2745,7 +2813,15 @@ module.exports = async function handler(req, res) {
           '/support',
           '/test_group',
         ],
-        supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
+        supported_updates: [
+          'message',
+          'edited_message',
+          'channel_post',
+          'edited_channel_post',
+          'my_chat_member',
+          'callback_query',
+          'pre_checkout_query',
+        ],
         payment_mode: 'telegram_stars (XTR)',
         currency: 'XTR',
         stars_amount: 100,
@@ -2808,7 +2884,15 @@ module.exports = async function handler(req, res) {
       ? 'callback_query'
       : update.message && update.message.successful_payment
       ? 'successful_payment'
-      : update.message || update.edited_message
+      : update.channel_post
+      ? 'channel_post'
+      : update.edited_channel_post
+      ? 'edited_channel_post'
+      : update.my_chat_member
+      ? 'my_chat_member'
+      : update.edited_message
+      ? 'edited_message'
+      : update.message
       ? 'message'
       : 'unknown';
 
@@ -2822,14 +2906,20 @@ module.exports = async function handler(req, res) {
 
     logger.webhook('TelegramWebhook', `Received Telegram update_id=${update.update_id}`, {
       updateType,
-      hasMessage: Boolean(update.message || update.edited_message),
+      hasMessage: Boolean(
+        update.message || update.edited_message || update.channel_post || update.edited_channel_post
+      ),
       hasCallbackQuery: Boolean(update.callback_query),
       hasPreCheckoutQuery: Boolean(update.pre_checkout_query),
       hasSuccessfulPayment: Boolean(update.message && update.message.successful_payment),
     });
 
     const customer = await handleTelegramUpdate(update);
-    const msgObj = update.message || update.edited_message;
+    const msgObj =
+      update.message ||
+      update.edited_message ||
+      update.channel_post ||
+      update.edited_channel_post;
     const chatId = String(
       (msgObj && msgObj.chat && msgObj.chat.id) ||
         (update.callback_query &&
