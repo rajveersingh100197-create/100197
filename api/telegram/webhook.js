@@ -1529,6 +1529,39 @@ async function answerTelegramCallbackQuery(callbackQueryId, text) {
   }
 }
 
+async function verifyTelegramGroupAdmin(chatId, userId) {
+  const cid = String(chatId);
+  const uid = String(userId);
+  if (!/^-\d+$/.test(cid)) {
+    return false;
+  }
+
+  const token = getConfig().TELEGRAM_BOT_TOKEN;
+  if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN' || cid.startsWith('sim_')) {
+    return true;
+  }
+
+  try {
+    const url = `https://api.telegram.org/bot${token}/getChatMember`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: cid,
+        user_id: Number(uid) || uid,
+      }),
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const data = await response.json();
+    const memberStatus = data && data.result && data.result.status;
+    return memberStatus === 'creator' || memberStatus === 'administrator';
+  } catch (_err) {
+    return false;
+  }
+}
+
 // ============================================================================
 // 5. ATOMIC TICKET GENERATOR & PAYMENT VERIFICATION (100 XTR)
 // ============================================================================
@@ -2359,11 +2392,55 @@ async function handleTelegramUpdate(update) {
   // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support)
   const incomingMsg = update.message || update.edited_message;
   if (incomingMsg && typeof incomingMsg.text === 'string') {
+    const chatType = (incomingMsg.chat && incomingMsg.chat.type) || 'private';
     const userId = String((incomingMsg.from && incomingMsg.from.id) || incomingMsg.chat.id);
     const chatId = String(incomingMsg.chat.id);
     const username = (incomingMsg.from && incomingMsg.from.username) || null;
     const text = incomingMsg.text.trim();
     const command = normalizeBotCommand(text);
+
+    // Group / Supergroup Isolation: ONLY process designated `/test_group` setup message from a group admin
+    if (chatType === 'group' || chatType === 'supergroup' || chatId.startsWith('-')) {
+      if (command !== '/test_group') {
+        return null;
+      }
+
+      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId);
+      if (!isAuthorizedAdmin) {
+        logger.security(
+          'AdminGroupSetup',
+          'Ignored /test_group command from non-administrator group member',
+          { chatType }
+        );
+        return null;
+      }
+
+      const configuredAdminCheck = validateAdminGroupChatId();
+      const matchesConfiguredEnv =
+        configuredAdminCheck.valid && configuredAdminCheck.chatId === chatId;
+
+      logger.info('AdminGroupSetup', 'Processed authorized /test_group setup check', {
+        groupChatId: chatId,
+        chatType,
+        matchesConfiguredEnv,
+      });
+
+      const setupReply = [
+        '🔐 DIWALI BIGDEAL — ADMIN GROUP SETUP CHECK',
+        '',
+        '✅ Bot received /test_group in this private group via the existing webhook.',
+        `🆔 Detected Group Chat ID: ${chatId}`,
+        `📌 Chat Type: ${chatType}`,
+        `⚙️ Environment Status: ${
+          matchesConfiguredEnv
+            ? 'MATCHED — TELEGRAM_ADMIN_CHAT_ID is already set to this group.'
+            : 'ACTION REQUIRED — Copy the negative Chat ID above into Vercel as TELEGRAM_ADMIN_CHAT_ID.'
+        }`,
+      ].join('\n');
+
+      await sendTelegramMessage(chatId, setupReply);
+      return null;
+    }
 
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),

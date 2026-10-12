@@ -839,3 +839,47 @@ export async function answerTelegramCallbackQuery(
     });
   }
 }
+
+/**
+ * Verifies whether a Telegram user is a group administrator or creator
+ * before allowing `/test_group` setup commands inside a group/supergroup.
+ */
+export async function verifyTelegramGroupAdmin(
+  chatId: string | number,
+  userId: string | number
+): Promise<boolean> {
+  const cid = String(chatId);
+  const uid = String(userId);
+  if (!/^-\d+$/.test(cid)) {
+    return false;
+  }
+
+  const token = CONFIG.TELEGRAM_BOT_TOKEN;
+  if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN' || cid.startsWith('sim_')) {
+    // Allow simulator/local testing with negative group IDs
+    return true;
+  }
+
+  try {
+    const url = `https://api.telegram.org/bot${token}/getChatMember`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: cid,
+        user_id: Number(uid) || uid,
+      }),
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const data = (await response.json()) as {
+      ok: boolean;
+      result?: { status?: string };
+    };
+    const memberStatus = data?.result?.status;
+    return memberStatus === 'creator' || memberStatus === 'administrator';
+  } catch {
+    return false;
+  }
+}

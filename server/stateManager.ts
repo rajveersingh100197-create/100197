@@ -24,6 +24,8 @@ import {
   notifyAdminWithdrawalRequested,
   sendTelegramMessage,
   sendTelegramStarsInvoice,
+  validateAdminGroupChatId,
+  verifyTelegramGroupAdmin,
 } from './telegramService';
 import {
   createPaymentOrderForCustomer,
@@ -684,10 +686,54 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
   // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support)
   if (update.message && typeof update.message.text === 'string') {
     const msg = update.message;
+    const chatType = msg.chat?.type || 'private';
     const userId = String(msg.from?.id || msg.chat.id);
     const chatId = String(msg.chat.id);
     const text = msg.text.trim();
     const command = normalizeBotCommand(text);
+
+    // Group / Supergroup Isolation: ONLY process designated `/test_group` setup message from a group admin
+    if (chatType === 'group' || chatType === 'supergroup' || chatId.startsWith('-')) {
+      if (command !== '/test_group') {
+        return null;
+      }
+
+      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId);
+      if (!isAuthorizedAdmin) {
+        logger.security(
+          'AdminGroupSetup',
+          'Ignored /test_group command from non-administrator group member',
+          { chatType }
+        );
+        return null;
+      }
+
+      const configuredAdminCheck = validateAdminGroupChatId();
+      const matchesConfiguredEnv =
+        configuredAdminCheck.valid && configuredAdminCheck.chatId === chatId;
+
+      logger.info('AdminGroupSetup', 'Processed authorized /test_group setup check', {
+        groupChatId: chatId,
+        chatType,
+        matchesConfiguredEnv,
+      });
+
+      const setupReply = [
+        '🔐 DIWALI BIGDEAL — ADMIN GROUP SETUP CHECK',
+        '',
+        '✅ Bot received /test_group in this private group via the existing webhook.',
+        `🆔 Detected Group Chat ID: ${chatId}`,
+        `📌 Chat Type: ${chatType}`,
+        `⚙️ Environment Status: ${
+          matchesConfiguredEnv
+            ? 'MATCHED — TELEGRAM_ADMIN_CHAT_ID is already set to this group.'
+            : 'ACTION REQUIRED — Copy the negative Chat ID above into Vercel as TELEGRAM_ADMIN_CHAT_ID.'
+        }`,
+      ].join('\n');
+
+      await sendTelegramMessage(chatId, setupReply);
+      return null;
+    }
 
     db.appendChatMessage(chatId, {
       id: crypto.randomUUID(),
