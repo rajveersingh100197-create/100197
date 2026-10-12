@@ -2052,7 +2052,7 @@ const BOT_MESSAGES = {
       : 'ℹ️ Referral Tracking Active (Bonus & Withdrawals disabled until campaign policy activation)';
 
     return [
-      '🎁 DIWALI BIGDEAL — REFER & EARN DASHBOARD',
+      '🎁 DIWALI BIGDEAL — EARN & REFER ₹100 INR PER REFERRAL',
       '',
       `🔑 Permanent Referral Code: ${data.referral_code}`,
       `🔗 Personal Referral Link:\n${data.referral_link}`,
