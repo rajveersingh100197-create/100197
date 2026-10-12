@@ -42,6 +42,39 @@ export interface ReferralHistoryItem {
   bonus_amount: number;
 }
 
+export interface AdminReferralHistoryRecord {
+  referred_telegram_user_id: string;
+  referred_username: string | null;
+  referred_name: string | null;
+  masked_identifier: string;
+  referred_at: string;
+  registration_completed: boolean;
+  payment_status_label: 'Pending' | 'Verified' | 'Failed';
+  ticket_number: string | null;
+  bonus_status_label: 'Pending' | 'Eligible' | 'Paid';
+  bonus_amount: number;
+}
+
+export interface AdminReferrerSummary {
+  telegram_user_id: string;
+  username: string | null;
+  display_name: string | null;
+  referral_code: string;
+  referral_link: string;
+  total_referred_users: number;
+  registered_referred_users: number;
+  verified_referred_payments: number;
+  pending_referred_payments: number;
+  total_verified_bonus: number;
+  available_withdrawal_balance: number;
+  pending_withdrawal_amount: number;
+  approved_withdrawal_amount: number;
+  paid_withdrawal_amount: number;
+  withdrawal_requests: WithdrawalRequest[];
+  referred_users: AdminReferralHistoryRecord[];
+  updated_at: string;
+}
+
 export interface CustomerReferralDashboardData {
   referral_code: string;
   referral_link: string;

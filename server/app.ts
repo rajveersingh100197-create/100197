@@ -336,6 +336,7 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
   const logs = logger.getRecentLogs(80);
   const adminNotifications = db.getRecentAdminNotifications(50);
   const withdrawalRequests = db.listAllWithdrawalRequests();
+  const referrerSummaries = db.listAllReferrerSummaries();
   const configStatus = getPublicConfigStatus();
   const adminCheck = validateAdminGroupChatId();
 
@@ -359,10 +360,19 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
     },
     stats,
     customers,
+    referrerSummaries,
     withdrawalRequests,
     adminNotifications,
     logs,
     sqlSchema: db.getSQLSchemaDDL(),
+  });
+});
+
+app.get('/api/admin/referrals', (_req: Request, res: Response) => {
+  return res.status(200).json({
+    ok: true,
+    referrerSummaries: db.listAllReferrerSummaries(),
+    withdrawalRequests: db.listAllWithdrawalRequests(),
   });
 });
 
@@ -407,6 +417,7 @@ app.post('/api/admin/withdrawal/:id/status', async (req: Request, res: Response)
       ok: true,
       withdrawal: updated,
       withdrawalRequests: db.listAllWithdrawalRequests(),
+      referrerSummaries: db.listAllReferrerSummaries(),
     });
   } catch (err) {
     return res.status(500).json({

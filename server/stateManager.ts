@@ -19,6 +19,7 @@ import {
   answerTelegramPreCheckoutQuery,
   MAIN_MENU_INLINE_KEYBOARD,
   notifyAdminNewBotStart,
+  notifyAdminReferralJoined,
   notifyAdminRegistrationSubmitted,
   notifyAdminWithdrawalRequested,
   sendTelegramMessage,
@@ -707,6 +708,12 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     if (referralCodeCandidate) {
       referralResult = db.applyReferralCodeOnce(userId, referralCodeCandidate);
       customer = db.getCustomerByUserId(userId) || customer;
+      if (referralResult.applied && referralResult.referrer) {
+        await notifyAdminReferralJoined({
+          referredCustomer: customer,
+          referrer: referralResult.referrer,
+        });
+      }
     }
 
     if (

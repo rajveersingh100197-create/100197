@@ -7,6 +7,8 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import {
+  AdminReferralHistoryRecord,
+  AdminReferrerSummary,
   ConversationState,
   CustomerRecord,
   CustomerReferralDashboardData,
@@ -642,6 +644,133 @@ class DatabaseManager {
     return Object.values(this.store.withdrawalRequests).sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
+  }
+
+  /**
+   * Computes a comprehensive per-referrer summary list for the Admin Referral Management Dashboard.
+   */
+  public listAllReferrerSummaries(): AdminReferrerSummary[] {
+    const allCustomers = Object.values(this.store.customers);
+    const bonusPerVerified = CONFIG.REFERRAL_PROGRAM_ENABLED
+      ? CONFIG.REFERRAL_BONUS_PER_VERIFIED_PAYMENT
+      : 0;
+
+    return allCustomers
+      .map((cust) => {
+        const uid = cust.telegram_user_id;
+        const referralCode =
+          normalizeReferralCode(cust.referral_code) || generateReferralCode(uid);
+        const referralLink = formatReferralLink(referralCode);
+
+        const referredCustomers = allCustomers
+          .filter(
+            (rc) =>
+              rc.telegram_user_id !== uid &&
+              rc.referred_by &&
+              normalizeReferralCode(rc.referred_by) === referralCode
+          )
+          .sort(
+            (a, b) =>
+              new Date(b.referred_at || b.created_at).getTime() -
+              new Date(a.referred_at || a.created_at).getTime()
+          );
+
+        const totalReferredUsers = referredCustomers.length;
+        const registeredReferredUsers = referredCustomers.filter((rc) =>
+          Boolean(rc.name && rc.phone && rc.address)
+        ).length;
+        const verifiedReferredPayments = referredCustomers.filter(
+          (rc) => rc.payment_status === PaymentStatus.PAID && Boolean(rc.ticket_number)
+        ).length;
+        const pendingReferredPayments = referredCustomers.filter(
+          (rc) => rc.payment_status !== PaymentStatus.PAID || !rc.ticket_number
+        ).length;
+
+        const totalVerifiedBonus = verifiedReferredPayments * bonusPerVerified;
+
+        const userWithdrawals = Object.values(this.store.withdrawalRequests)
+          .filter((w) => w.telegram_user_id === uid)
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+        const pendingWithdrawalAmount = userWithdrawals
+          .filter((w) => w.status === 'PENDING_APPROVAL')
+          .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+        const approvedWithdrawalAmount = userWithdrawals
+          .filter((w) => w.status === 'APPROVED_PENDING_PAYOUT')
+          .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+        const paidWithdrawalAmount = userWithdrawals
+          .filter((w) => w.status === 'PAID')
+          .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+        const lockedOrPaidAmount =
+          pendingWithdrawalAmount + approvedWithdrawalAmount + paidWithdrawalAmount;
+
+        const availableWithdrawalBalance = Math.max(0, totalVerifiedBonus - lockedOrPaidAmount);
+
+        let remainingPaidPool = paidWithdrawalAmount;
+
+        const referredUsers: AdminReferralHistoryRecord[] = referredCustomers.map((rc) => {
+          const regDone = Boolean(rc.name && rc.phone && rc.address);
+          const isVerifiedPaid =
+            rc.payment_status === PaymentStatus.PAID && Boolean(rc.ticket_number);
+          const paymentStatusLabel: 'Pending' | 'Verified' | 'Failed' = isVerifiedPaid
+            ? 'Verified'
+            : rc.payment_status === PaymentStatus.FAILED
+            ? 'Failed'
+            : 'Pending';
+
+          let bonusStatusLabel: 'Pending' | 'Eligible' | 'Paid' = 'Pending';
+          if (isVerifiedPaid && CONFIG.REFERRAL_PROGRAM_ENABLED) {
+            if (remainingPaidPool >= bonusPerVerified && bonusPerVerified > 0) {
+              bonusStatusLabel = 'Paid';
+              remainingPaidPool -= bonusPerVerified;
+            } else {
+              bonusStatusLabel = 'Eligible';
+            }
+          }
+
+          return {
+            referred_telegram_user_id: rc.telegram_user_id,
+            referred_username: rc.username || null,
+            referred_name: rc.name || null,
+            masked_identifier: maskCustomerIdentifier(rc),
+            referred_at: rc.referred_at || rc.created_at,
+            registration_completed: regDone,
+            payment_status_label: paymentStatusLabel,
+            ticket_number: rc.ticket_number || null,
+            bonus_status_label: bonusStatusLabel,
+            bonus_amount: isVerifiedPaid ? bonusPerVerified : 0,
+          };
+        });
+
+        return {
+          telegram_user_id: uid,
+          username: cust.username || null,
+          display_name: cust.name || cust.username || `User ${uid}`,
+          referral_code: referralCode,
+          referral_link: referralLink,
+          total_referred_users: totalReferredUsers,
+          registered_referred_users: registeredReferredUsers,
+          verified_referred_payments: verifiedReferredPayments,
+          pending_referred_payments: pendingReferredPayments,
+          total_verified_bonus: totalVerifiedBonus,
+          available_withdrawal_balance: availableWithdrawalBalance,
+          pending_withdrawal_amount: pendingWithdrawalAmount,
+          approved_withdrawal_amount: approvedWithdrawalAmount,
+          paid_withdrawal_amount: paidWithdrawalAmount,
+          withdrawal_requests: userWithdrawals,
+          referred_users: referredUsers,
+          updated_at: cust.updated_at,
+        };
+      })
+      .sort((a, b) => {
+        if (b.total_referred_users !== a.total_referred_users) {
+          return b.total_referred_users - a.total_referred_users;
+        }
+        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      });
   }
 
   public hasAdminNotificationBeenSent(dedupKey: string): boolean {

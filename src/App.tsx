@@ -66,6 +66,49 @@ interface WithdrawalRequest {
   updated_at: string;
 }
 
+interface AdminReferralHistoryRecord {
+  referred_telegram_user_id: string;
+  referred_username: string | null;
+  referred_name: string | null;
+  masked_identifier: string;
+  referred_at: string;
+  registration_completed: boolean;
+  payment_status_label: 'Pending' | 'Verified' | 'Failed';
+  ticket_number: string | null;
+  bonus_status_label: 'Pending' | 'Eligible' | 'Paid';
+  bonus_amount: number;
+}
+
+interface AdminReferrerSummary {
+  telegram_user_id: string;
+  username: string | null;
+  display_name: string | null;
+  referral_code: string;
+  referral_link: string;
+  total_referred_users: number;
+  registered_referred_users: number;
+  verified_referred_payments: number;
+  pending_referred_payments: number;
+  total_verified_bonus: number;
+  available_withdrawal_balance: number;
+  pending_withdrawal_amount: number;
+  approved_withdrawal_amount: number;
+  paid_withdrawal_amount: number;
+  withdrawal_requests: WithdrawalRequest[];
+  referred_users: AdminReferralHistoryRecord[];
+  updated_at: string;
+}
+
+interface AdminNotificationEntry {
+  id: string;
+  dedup_key: string;
+  event_type: string;
+  text: string;
+  delivered_to_telegram: boolean;
+  telegram_status: string;
+  created_at: string;
+}
+
 interface SystemLogEntry {
   id: string;
   level: 'INFO' | 'WARN' | 'ERROR' | 'SECURITY' | 'WEBHOOK';
@@ -86,6 +129,7 @@ interface OverviewResponse {
     telegramBotTokenConfigured: boolean;
     telegramWebhookSecretConfigured: boolean;
     telegramAdminChatConfigured?: boolean;
+    adminGroupValidationMessage?: string;
     botUsername?: string;
     referralProgramEnabled?: boolean;
     referralWithdrawalsEnabled?: boolean;
@@ -104,7 +148,9 @@ interface OverviewResponse {
     totalStarsCollected?: number;
   };
   customers: CustomerRecord[];
+  referrerSummaries?: AdminReferrerSummary[];
   withdrawalRequests?: WithdrawalRequest[];
+  adminNotifications?: AdminNotificationEntry[];
   logs: SystemLogEntry[];
   sqlSchema: string;
 }
@@ -129,6 +175,12 @@ export default function App() {
   // Database filter state
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [stateFilter, setStateFilter] = useState<string>('ALL');
+  const [selectedReferrerId, setSelectedReferrerId] = useState<string | null>(null);
+  const [sendingTestAdminNotif, setSendingTestAdminNotif] = useState<boolean>(false);
+  const [testNotifBanner, setTestNotifBanner] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
 
   // Copy state
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -425,6 +477,35 @@ export default function App() {
       await fetchOverview();
     } catch (err) {
       console.error('Failed to update withdrawal status:', err);
+    }
+  };
+
+  const handleSendTestAdminNotification = async () => {
+    setSendingTestAdminNotif(true);
+    setTestNotifBanner(null);
+    try {
+      const res = await fetch('/api/admin/test-notification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          note: 'Admin Dashboard Manual Verification Test',
+        }),
+      });
+      const data = await res.json();
+      setTestNotifBanner({
+        ok: Boolean(data.ok),
+        text: data.ok
+          ? `Delivered test message to private Telegram admin group (${data.delivery_status}).`
+          : `Logged test notification locally (${data.delivery_status}). Configure TELEGRAM_ADMIN_CHAT_ID with your negative private group ID to deliver live.`,
+      });
+      await fetchOverview();
+    } catch (err) {
+      setTestNotifBanner({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to trigger test admin notification',
+      });
+    } finally {
+      setSendingTestAdminNotif(false);
     }
   };
 
@@ -1199,6 +1280,199 @@ export default function App() {
               </div>
             </div>
 
+            {/* Admin Referral Management Section (Phase 2) */}
+            <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-semibold text-white">
+                    Referral Management &amp; Attribution Ledger
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Per-referrer tracking showing permanent referral code, referral link, joined users, completed registrations, verified payments, pending payments, and withdrawal balances.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 text-xs font-mono">
+                  <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
+                    Total Referrals: <strong className="text-amber-400">{overview?.stats.totalReferrals ?? 0}</strong>
+                  </span>
+                  <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
+                    Pending Withdrawals: <strong className="text-sky-400">{overview?.stats.pendingWithdrawals ?? 0}</strong>
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-800 rounded-lg">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-900/80 text-slate-400 font-medium">
+                      <th className="py-3 px-3">telegram_user_id</th>
+                      <th className="py-3 px-3">username / name</th>
+                      <th className="py-3 px-3">referral_code</th>
+                      <th className="py-3 px-3">referral_link</th>
+                      <th className="py-3 px-3 text-right">joined</th>
+                      <th className="py-3 px-3 text-right">registered</th>
+                      <th className="py-3 px-3 text-right">verified_paid</th>
+                      <th className="py-3 px-3 text-right">pending_pay</th>
+                      <th className="py-3 px-3 text-right">verified_bonus</th>
+                      <th className="py-3 px-3 text-right">avail_bal</th>
+                      <th className="py-3 px-3 text-right">pending / appr / paid</th>
+                      <th className="py-3 px-3 text-right">History</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70 font-mono tabular-nums">
+                    {!overview?.referrerSummaries || overview.referrerSummaries.length === 0 ? (
+                      <tr>
+                        <td colSpan={12} className="py-6 text-center text-slate-500 font-sans">
+                          No referrer records found.
+                        </td>
+                      </tr>
+                    ) : (
+                      overview.referrerSummaries.map((ref) => {
+                        const isExpanded = selectedReferrerId === ref.telegram_user_id;
+                        return (
+                          <React.Fragment key={ref.telegram_user_id}>
+                            <tr className="hover:bg-slate-800/40 transition-colors">
+                              <td className="py-3 px-3 text-white font-semibold">
+                                {ref.telegram_user_id}
+                              </td>
+                              <td className="py-3 px-3 font-sans text-slate-200">
+                                {ref.display_name || '—'}
+                                {ref.username ? (
+                                  <span className="text-slate-400 text-[11px] ml-1 font-mono">
+                                    (@{ref.username.replace(/^@/, '')})
+                                  </span>
+                                ) : null}
+                              </td>
+                              <td className="py-3 px-3 text-amber-300 font-semibold">
+                                {ref.referral_code}
+                              </td>
+                              <td className="py-3 px-3 max-w-[220px] truncate text-sky-400" title={ref.referral_link}>
+                                <button
+                                  onClick={() => copyToClipboard(`ref_${ref.referral_code}`, ref.referral_link)}
+                                  className="hover:underline text-left truncate max-w-[200px]"
+                                >
+                                  {copiedKey === `ref_${ref.referral_code}` ? 'Copied Link!' : ref.referral_link}
+                                </button>
+                              </td>
+                              <td className="py-3 px-3 text-right text-white font-semibold">
+                                {ref.total_referred_users}
+                              </td>
+                              <td className="py-3 px-3 text-right text-slate-200">
+                                {ref.registered_referred_users}
+                              </td>
+                              <td className="py-3 px-3 text-right text-emerald-400 font-semibold">
+                                {ref.verified_referred_payments}
+                              </td>
+                              <td className="py-3 px-3 text-right text-amber-400">
+                                {ref.pending_referred_payments}
+                              </td>
+                              <td className="py-3 px-3 text-right text-emerald-300">
+                                {ref.total_verified_bonus} ★
+                              </td>
+                              <td className="py-3 px-3 text-right text-sky-300 font-semibold">
+                                {ref.available_withdrawal_balance} ★
+                              </td>
+                              <td className="py-3 px-3 text-right text-slate-300">
+                                {ref.pending_withdrawal_amount} / {ref.approved_withdrawal_amount} / {ref.paid_withdrawal_amount} ★
+                              </td>
+                              <td className="py-3 px-3 text-right font-sans">
+                                <button
+                                  onClick={() =>
+                                    setSelectedReferrerId(isExpanded ? null : ref.telegram_user_id)
+                                  }
+                                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 text-[11px] whitespace-nowrap"
+                                >
+                                  {isExpanded
+                                    ? 'Hide Referred'
+                                    : `View Referred (${ref.referred_users.length})`}
+                                </button>
+                              </td>
+                            </tr>
+                            {isExpanded && (
+                              <tr className="bg-slate-950/80">
+                                <td colSpan={12} className="p-4">
+                                  <div className="text-xs font-sans font-semibold text-slate-200 mb-2">
+                                    Referred Users History for {ref.display_name} (Code:{' '}
+                                    <span className="font-mono text-amber-400">{ref.referral_code}</span>)
+                                  </div>
+                                  {ref.referred_users.length === 0 ? (
+                                    <div className="text-xs text-slate-500 font-sans">
+                                      No users have joined via this referral link yet.
+                                    </div>
+                                  ) : (
+                                    <div className="overflow-x-auto border border-slate-800 rounded-lg">
+                                      <table className="w-full text-left border-collapse text-xs">
+                                        <thead>
+                                          <tr className="border-b border-slate-800 bg-slate-900 text-slate-400">
+                                            <th className="py-2 px-3">referred_user_id</th>
+                                            <th className="py-2 px-3">masked_display</th>
+                                            <th className="py-2 px-3">referred_at</th>
+                                            <th className="py-2 px-3">registration_status</th>
+                                            <th className="py-2 px-3">payment_verification</th>
+                                            <th className="py-2 px-3">ticket_number</th>
+                                            <th className="py-2 px-3">referral_bonus_status</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-800/60 font-mono">
+                                          {ref.referred_users.map((ru) => (
+                                            <tr key={ru.referred_telegram_user_id}>
+                                              <td className="py-2 px-3 text-white">
+                                                {ru.referred_telegram_user_id}
+                                              </td>
+                                              <td className="py-2 px-3 font-sans text-slate-300">
+                                                {ru.masked_identifier}
+                                              </td>
+                                              <td className="py-2 px-3 text-slate-400">
+                                                {new Date(ru.referred_at).toLocaleString()}
+                                              </td>
+                                              <td className="py-2 px-3">
+                                                <span
+                                                  className={
+                                                    ru.registration_completed
+                                                      ? 'text-emerald-400'
+                                                      : 'text-amber-400'
+                                                  }
+                                                >
+                                                  {ru.registration_completed ? 'Complete' : 'Incomplete'}
+                                                </span>
+                                              </td>
+                                              <td className="py-2 px-3">
+                                                <span
+                                                  className={
+                                                    ru.payment_status_label === 'Verified'
+                                                      ? 'text-emerald-400 font-semibold'
+                                                      : ru.payment_status_label === 'Failed'
+                                                      ? 'text-red-400'
+                                                      : 'text-amber-400'
+                                                  }
+                                                >
+                                                  {ru.payment_status_label}
+                                                </span>
+                                              </td>
+                                              <td className="py-2 px-3 text-emerald-400">
+                                                {ru.ticket_number || '—'}
+                                              </td>
+                                              <td className="py-2 px-3 text-sky-300">
+                                                {ru.bonus_status_label} ({ru.bonus_amount} ★)
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             {/* Admin Withdrawal Approval & Payout Ledger */}
             <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6">
               <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
@@ -1320,6 +1594,88 @@ export default function App() {
         )}
 
         {activeTab === 'webhooks' && (
+          <div className="space-y-6">
+            {/* Private Telegram Admin Group Notification Center */}
+            <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">
+                    Private Telegram Admin Group Activity Notifications
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Server-side deduplicated notifications sent to <code className="text-amber-400">TELEGRAM_ADMIN_CHAT_ID</code> for new <code className="text-slate-200">/start</code> events, referral link joins, registration submissions, verified payments, and withdrawal updates.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`px-2.5 py-1 rounded text-xs font-mono border ${
+                      overview?.config.telegramAdminChatConfigured
+                        ? 'bg-emerald-950/50 border-emerald-700 text-emerald-300'
+                        : 'bg-amber-950/50 border-amber-700 text-amber-300'
+                    }`}
+                  >
+                    {overview?.config.telegramAdminChatConfigured
+                      ? 'ADMIN GROUP: CONFIGURED'
+                      : 'ADMIN GROUP: LOCAL LOG MODE'}
+                  </span>
+                  <button
+                    disabled={sendingTestAdminNotif}
+                    onClick={handleSendTestAdminNotification}
+                    className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    {sendingTestAdminNotif ? 'Sending Test...' : 'Send Test Admin Notification'}
+                  </button>
+                </div>
+              </div>
+
+              {testNotifBanner && (
+                <div
+                  className={`p-3 rounded-lg border text-xs ${
+                    testNotifBanner.ok
+                      ? 'bg-emerald-950/40 border-emerald-700 text-emerald-200'
+                      : 'bg-amber-950/40 border-amber-700 text-amber-200'
+                  }`}
+                >
+                  {testNotifBanner.text}
+                </div>
+              )}
+
+              <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-950">
+                <div className="max-h-[280px] overflow-y-auto divide-y divide-slate-800/60 font-mono text-xs">
+                  {!overview?.adminNotifications || overview.adminNotifications.length === 0 ? (
+                    <div className="p-6 text-center text-slate-500 font-sans">
+                      No admin notifications recorded yet.
+                    </div>
+                  ) : (
+                    overview.adminNotifications.map((notif) => (
+                      <div key={notif.id} className="p-3.5 hover:bg-slate-900/50 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-amber-400 font-semibold">
+                            [{notif.event_type}]
+                          </span>
+                          <div className="flex items-center gap-3 text-[11px]">
+                            <span
+                              className={
+                                notif.delivered_to_telegram ? 'text-emerald-400' : 'text-slate-400'
+                              }
+                            >
+                              {notif.telegram_status}
+                            </span>
+                            <span className="text-slate-500">
+                              {new Date(notif.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                        <pre className="text-slate-200 whitespace-pre-wrap font-mono text-xs leading-relaxed">
+                          {notif.text}
+                        </pre>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
           <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
@@ -1376,6 +1732,7 @@ export default function App() {
                 ))}
               </div>
             </div>
+          </div>
           </div>
         )}
 

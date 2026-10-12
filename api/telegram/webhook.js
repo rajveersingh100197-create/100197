@@ -1045,6 +1045,29 @@ async function notifyAdminNewBotStart({ customer, username, referralApplied, ref
   });
 }
 
+async function notifyAdminReferralJoined({ referredCustomer, referrer }) {
+  const dedupKey = `ref_join_${referredCustomer.telegram_user_id}_${referrer.referral_code}`;
+  const handle = referredCustomer.username
+    ? `@${String(referredCustomer.username).replace(/^@/, '')}`
+    : 'No username';
+  const lines = [
+    '🤝 NEW REFERRAL LINK JOIN — DiwaliBigdeal',
+    '',
+    `👤 Referred User ID: ${referredCustomer.telegram_user_id} (${handle})`,
+    `🔑 Used Referral Code: ${referrer.referral_code}`,
+    `🎯 Referrer User ID: ${referrer.telegram_user_id}${
+      referrer.name ? ` (${referrer.name})` : ''
+    }`,
+    `📊 Referrer Total Joined Users: ${referrer.referral_count}`,
+    `🕒 Joined At: ${new Date().toISOString()}`,
+  ];
+  return sendAdminGroupNotification({
+    eventType: 'BOT_START',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
 async function notifyAdminRegistrationSubmitted(customer) {
   const fingerprint = crypto
     .createHash('sha256')
@@ -2357,6 +2380,12 @@ async function handleTelegramUpdate(update) {
     if (referralCodeCandidate) {
       referralResult = db.applyReferralCodeOnce(userId, referralCodeCandidate);
       customer = db.getCustomerByUserId(userId) || customer;
+      if (referralResult.applied && referralResult.referrer) {
+        await notifyAdminReferralJoined({
+          referredCustomer: customer,
+          referrer: referralResult.referrer,
+        });
+      }
     }
 
     // Command: /start, /menu, /help, hi, hello

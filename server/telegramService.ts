@@ -260,6 +260,35 @@ export async function notifyAdminNewBotStart(params: {
   });
 }
 
+export async function notifyAdminReferralJoined(params: {
+  referredCustomer: CustomerRecord;
+  referrer: CustomerRecord;
+}) {
+  const { referredCustomer, referrer } = params;
+  const dedupKey = `ref_join_${referredCustomer.telegram_user_id}_${referrer.referral_code}`;
+  const handle = referredCustomer.username
+    ? `@${referredCustomer.username.replace(/^@/, '')}`
+    : 'No username';
+
+  const lines = [
+    '🤝 NEW REFERRAL LINK JOIN — DiwaliBigdeal',
+    '',
+    `👤 Referred User ID: ${referredCustomer.telegram_user_id} (${handle})`,
+    `🔑 Used Referral Code: ${referrer.referral_code}`,
+    `🎯 Referrer User ID: ${referrer.telegram_user_id}${
+      referrer.name ? ` (${referrer.name})` : ''
+    }`,
+    `📊 Referrer Total Joined Users: ${referrer.referral_count}`,
+    `🕒 Joined At: ${new Date().toISOString()}`,
+  ];
+
+  return sendAdminGroupNotification({
+    eventType: 'BOT_START',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
 export async function notifyAdminRegistrationSubmitted(customer: CustomerRecord) {
   // Deduplicate based on user + normalized registration fingerprint so edits only notify if changed
   const fingerprint = crypto
