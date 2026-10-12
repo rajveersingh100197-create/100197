@@ -179,6 +179,12 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
     telegramPaymentChargeId
   );
 
+  // Credit verified referral bonus to referrer strictly once per verified payment
+  const referralCredit = db.creditVerifiedReferralOnPayment(
+    issuance.customer.telegram_user_id,
+    paymentId
+  );
+
   // Only send the Telegram success confirmation message on first verified payment processing
   if (!issuance.alreadyIssued) {
     const successMessage = [
@@ -211,12 +217,16 @@ export async function processVerifiedPaymentWebhook(input: WebhookProcessInput) 
       ticketNumber: issuance.ticketNumber,
       paymentId,
       chargeId: telegramPaymentChargeId,
+      referralBonusCredited: referralCredit.credited,
+      referrer: referralCredit.referrer,
+      bonusAdded: referralCredit.bonusAdded,
     });
 
     logger.info('PaymentVerification', `Sent Telegram confirmation for ticket ${issuance.ticketNumber}`, {
       telegram_user_id: issuance.customer.telegram_user_id,
       payment_id: paymentId,
       telegram_payment_charge_id: telegramPaymentChargeId || 'webhook',
+      referral_credited: referralCredit.credited,
     });
   }
 

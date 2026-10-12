@@ -20,6 +20,47 @@ export enum PaymentStatus {
   FAILED = 'FAILED',
 }
 
+export type WithdrawalStatus = 'PENDING_APPROVAL' | 'APPROVED_PENDING_PAYOUT' | 'PAID' | 'REJECTED';
+
+export interface WithdrawalRequest {
+  id: string;
+  telegram_user_id: string;
+  referral_code: string;
+  amount: number;
+  status: WithdrawalStatus;
+  payout_reference: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReferralHistoryItem {
+  masked_identifier: string;
+  referred_at: string;
+  registration_completed: boolean;
+  payment_status_label: 'Pending' | 'Verified' | 'Failed';
+  bonus_status_label: 'Pending' | 'Eligible' | 'Paid';
+  bonus_amount: number;
+}
+
+export interface CustomerReferralDashboardData {
+  referral_code: string;
+  referral_link: string;
+  referred_by: string | null;
+  referral_program_enabled: boolean;
+  withdrawals_enabled: boolean;
+  total_referred_users: number;
+  registered_referred_users: number;
+  verified_referred_payments: number;
+  pending_referred_payments: number;
+  total_verified_bonus: number;
+  locked_or_paid_withdrawal_amount: number;
+  available_withdrawal_balance: number;
+  can_request_withdrawal: boolean;
+  min_withdrawal_amount: number;
+  withdrawal_requests: WithdrawalRequest[];
+  history: ReferralHistoryItem[];
+}
+
 export interface CustomerRecord {
   telegram_user_id: string;
   telegram_chat_id: string;
@@ -34,7 +75,11 @@ export interface CustomerRecord {
   ticket_number: string | null;
   referral_code: string;
   referred_by: string | null;
+  referred_by_user_id?: string | null;
+  referred_at?: string | null;
   referral_count: number;
+  verified_referral_count?: number;
+  verified_referral_bonus?: number;
   created_at: string;
   updated_at: string;
 }

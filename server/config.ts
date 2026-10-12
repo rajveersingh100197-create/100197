@@ -22,6 +22,15 @@ export const CONFIG = {
   TELEGRAM_BOT_TOKEN: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
   TELEGRAM_WEBHOOK_SECRET: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
   TELEGRAM_ADMIN_CHAT_ID: (process.env.TELEGRAM_ADMIN_CHAT_ID || '').trim(),
+  TELEGRAM_BOT_USERNAME: (process.env.TELEGRAM_BOT_USERNAME || 'DiwaliDhamaka2026Bot')
+    .trim()
+    .replace(/^@/, ''),
+  REFERRAL_PROGRAM_ENABLED:
+    String(process.env.REFERRAL_PROGRAM_ENABLED || 'false').toLowerCase() === 'true',
+  REFERRAL_WITHDRAWALS_ENABLED:
+    String(process.env.REFERRAL_WITHDRAWALS_ENABLED || 'false').toLowerCase() === 'true',
+  REFERRAL_BONUS_PER_VERIFIED_PAYMENT: 100,
+  REFERRAL_MIN_WITHDRAWAL_AMOUNT: 1000,
   PAYMENT_PROVIDER: 'telegram_stars',
   PAYMENT_WEBHOOK_SECRET: (process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026').trim(),
   DATABASE_PATH: process.env.DATABASE_PATH || './data/diwalibigdeal.sqlite',
@@ -48,6 +57,11 @@ export function getPublicConfigStatus() {
         CONFIG.TELEGRAM_ADMIN_CHAT_ID !== 'YOUR_PRIVATE_ADMIN_GROUP_CHAT_ID' &&
         /^-\d+$/.test(CONFIG.TELEGRAM_ADMIN_CHAT_ID)
     ),
+    botUsername: CONFIG.TELEGRAM_BOT_USERNAME,
+    referralProgramEnabled: CONFIG.REFERRAL_PROGRAM_ENABLED,
+    referralWithdrawalsEnabled: CONFIG.REFERRAL_WITHDRAWALS_ENABLED,
+    referralBonusAmount: CONFIG.REFERRAL_BONUS_PER_VERIFIED_PAYMENT,
+    referralMinWithdrawal: CONFIG.REFERRAL_MIN_WITHDRAWAL_AMOUNT,
     paymentProvider: 'telegram_stars',
     paymentCredentialsConfigured: Boolean(
       CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_BOT_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN'

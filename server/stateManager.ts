@@ -4,11 +4,13 @@
  */
 
 import crypto from 'crypto';
-import { db } from './db';
+import { db, normalizeReferralCode } from './db';
 import { logger } from './logger';
 import {
   ConversationState,
   CustomerRecord,
+  CustomerReferralDashboardData,
+  InlineKeyboardButton,
   PaymentStatus,
   TelegramUpdate,
 } from './types';
@@ -18,6 +20,7 @@ import {
   MAIN_MENU_INLINE_KEYBOARD,
   notifyAdminNewBotStart,
   notifyAdminRegistrationSubmitted,
+  notifyAdminWithdrawalRequested,
   sendTelegramMessage,
   sendTelegramStarsInvoice,
 } from './telegramService';
@@ -26,20 +29,24 @@ import {
   processVerifiedPaymentWebhook,
 } from './paymentService';
 
+/**
+ * Extracts a referral code from `/start ref_CODE`, `/start REF-CODE`, or standalone `ref_CODE`.
+ * Link format: https://t.me/DiwaliDhamaka2026Bot?start=ref_CODE
+ */
 export function extractReferralCodeFromText(rawText: string): string | null {
   const trimmed = String(rawText || '').trim();
   const parts = trimmed.split(/\s+/);
   if (parts.length >= 2) {
     const cmd = parts[0].split('@')[0].toLowerCase();
     if (cmd === '/start' || cmd === '/join' || cmd === '/enter') {
-      const arg = parts[1].trim().toUpperCase();
-      if (/^(REF-[A-Z0-9]{4,12}|[A-Z0-9]{4,12})$/.test(arg)) {
-        return arg.startsWith('REF-') ? arg : `REF-${arg}`;
+      const arg = parts[1].trim();
+      if (/^(ref_|ref-)?[A-Z0-9]{4,12}$/i.test(arg)) {
+        return normalizeReferralCode(arg);
       }
     }
   }
-  if (/^REF-[A-Z0-9]{4,12}$/i.test(trimmed)) {
-    return trimmed.toUpperCase();
+  if (/^(ref_|ref-)[A-Z0-9]{4,12}$/i.test(trimmed)) {
+    return normalizeReferralCode(trimmed);
   }
   return null;
 }
@@ -242,7 +249,93 @@ export const BOT_MESSAGES = {
       '',
       '📧 Support Email: diwalideal2026@gmail.com',
     ].join('\n'),
+
+  /**
+   * Unified single-message Referral Dashboard showing all required stats,
+   * referral link, withdrawal status, and masked referral history.
+   */
+  referralDashboard: (data: CustomerReferralDashboardData) => {
+    const pendingWithdrawals = data.withdrawal_requests.filter(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+    const withdrawalLines =
+      data.withdrawal_requests.length === 0
+        ? ['• कोई Pending या पिछला Withdrawal Request नहीं है (None)']
+        : data.withdrawal_requests.slice(0, 5).map((w) => {
+            const refStr = w.payout_reference ? ` [Ref: ${w.payout_reference}]` : '';
+            return `• ${w.id}: ${w.amount} Stars — Status: ${w.status}${refStr}`;
+          });
+
+    const historyLines =
+      data.history.length === 0
+        ? ['• अभी तक कोई Referred User नहीं है (0 Referrals recorded in DB)']
+        : data.history.slice(0, 10).map((item, idx) => {
+            const dateStr = item.referred_at.slice(0, 10);
+            const regStr = item.registration_completed ? 'Complete' : 'Incomplete';
+            return `${idx + 1}. ${item.masked_identifier} | Date: ${dateStr} | Reg: ${regStr} | Payment: ${item.payment_status_label} | Bonus: ${item.bonus_status_label}`;
+          });
+
+    const programStatusLine = data.referral_program_enabled
+      ? `✅ Referral Bonus Active (Min Withdrawal: ${data.min_withdrawal_amount} Stars)`
+      : 'ℹ️ Referral Tracking Active (Bonus & Withdrawals disabled until campaign policy activation)';
+
+    return [
+      '🎁 DIWALI BIGDEAL — REFER & EARN DASHBOARD',
+      '',
+      `🔑 Permanent Referral Code: ${data.referral_code}`,
+      `🔗 Personal Referral Link:\n${data.referral_link}`,
+      '📋 (ऊपर दिए गए Link को Tap करके Copy या Share करें)',
+      '',
+      '📊 LIVE REFERRAL STATS (Database Records):',
+      `• Total Referred Users: ${data.total_referred_users}`,
+      `• Successfully Registered Referred Users: ${data.registered_referred_users}`,
+      `• Successfully Verified Referred Payments: ${data.verified_referred_payments}`,
+      `• Pending Payments: ${data.pending_referred_payments}`,
+      `• Total Verified Referral Bonus: ${data.total_verified_bonus} Stars`,
+      `• Available Withdrawal Balance: ${data.available_withdrawal_balance} Stars`,
+      `• Pending Withdrawal Requests: ${pendingWithdrawals.length}`,
+      `• Program Status: ${programStatusLine}`,
+      '',
+      '🏦 WITHDRAWAL REQUESTS & STATUS:',
+      ...withdrawalLines,
+      '',
+      '📜 REFERRAL HISTORY (Privacy-Masked):',
+      ...historyLines,
+    ].join('\n');
+  },
 };
+
+export function buildReferralDashboardKeyboard(data: CustomerReferralDashboardData) {
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(
+    data.referral_link
+  )}&text=${encodeURIComponent(
+    '🪔 DiwaliBigdeal से जुड़ें और Mahindra Thar ROXX, Refrigerator, Smart LED TV व Cash Prizes जीतने का मौका पाएँ!'
+  )}`;
+
+  const rows: InlineKeyboardButton[][] = [
+    [
+      { text: '📤 Share Referral Link', url: shareUrl },
+      { text: '📋 Copy Link / Code', callback_data: 'action_copy_referral_link' },
+    ],
+  ];
+
+  // Show Request Withdrawal button inside the Refer & Earn view ONLY when user has eligible available balance
+  if (data.can_request_withdrawal) {
+    rows.push([
+      {
+        text: `💸 Request Withdrawal (${data.available_withdrawal_balance} Stars)`,
+        callback_data: 'action_request_withdrawal',
+      },
+    ]);
+  }
+
+  rows.push([
+    { text: '🔄 Refresh Stats', callback_data: 'menu_refer_earn' },
+    { text: '🏠 Main Menu', callback_data: 'action_back_main_menu' },
+  ]);
+
+  return { inline_keyboard: rows };
+}
 
 async function sendConfirmationScreen(customer: CustomerRecord) {
   const text = BOT_MESSAGES.confirmDetails(
@@ -346,6 +439,13 @@ async function handleSupportTrigger(customer: CustomerRecord) {
   );
 }
 
+async function handleReferAndEarnTrigger(customer: CustomerRecord) {
+  const dashboardData = db.getCustomerReferralDashboard(customer.telegram_user_id);
+  const text = BOT_MESSAGES.referralDashboard(dashboardData);
+  const keyboard = buildReferralDashboardKeyboard(dashboardData);
+  await sendTelegramMessage(customer.telegram_chat_id, text, keyboard);
+}
+
 export async function handleTelegramUpdate(update: TelegramUpdate): Promise<CustomerRecord | null> {
   // 0. Handle Telegram Stars `pre_checkout_query`
   if (update.pre_checkout_query) {
@@ -439,6 +539,10 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       action_edit_details: '✏️ जानकारी बदलें | Edit Details',
       menu_my_ticket: '🎫 मेरा टिकट | My Ticket',
       menu_prize_details: '🎁 इनाम देखें | View Prizes',
+      menu_refer_earn: '🎁 Refer & Earn',
+      action_copy_referral_link: '📋 Copy Link / Code',
+      action_request_withdrawal: '💸 Request Withdrawal',
+      action_back_main_menu: '🏠 Main Menu',
       menu_terms: '📜 नियम और शर्तें | Terms & Conditions',
       menu_support: '📞 सहायता | Support',
     };
@@ -501,6 +605,68 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       return customer;
     }
 
+    if (data === 'menu_refer_earn') {
+      await handleReferAndEarnTrigger(customer);
+      return customer;
+    }
+
+    if (data === 'action_copy_referral_link') {
+      const dash = db.getCustomerReferralDashboard(userId);
+      await sendTelegramMessage(
+        chatId,
+        [
+          '📋 आपका Permanent Referral Code और Link:',
+          '',
+          `🔑 Referral Code: ${dash.referral_code}`,
+          `🔗 Referral Link:\n${dash.referral_link}`,
+          '',
+          'इस संदेश को Copy या Forward करके अपने दोस्तों के साथ साझा करें!',
+        ].join('\n'),
+        buildReferralDashboardKeyboard(dash)
+      );
+      return customer;
+    }
+
+    if (data === 'action_request_withdrawal') {
+      const reqResult = db.createWithdrawalRequest(userId);
+      const updatedDash = db.getCustomerReferralDashboard(userId);
+      if (reqResult.ok && reqResult.request) {
+        await notifyAdminWithdrawalRequested({
+          customer,
+          request: reqResult.request,
+        });
+        await sendTelegramMessage(
+          chatId,
+          [
+            '✅ आपका Withdrawal Request सफलतापूर्वक दर्ज कर लिया गया है!',
+            '',
+            `🆔 Request ID: ${reqResult.request.id}`,
+            `💰 Amount: ${reqResult.request.amount} Stars`,
+            `📌 Status: ${reqResult.request.status} (Awaiting Admin Review)`,
+            '',
+            '⚠️ ध्यान दें: प्रत्येक Withdrawal Request की Admin द्वारा जाँच की जाती है।',
+          ].join('\n'),
+          buildReferralDashboardKeyboard(updatedDash)
+        );
+      } else {
+        await sendTelegramMessage(
+          chatId,
+          `⚠️ Withdrawal Request उपलब्ध नहीं है: ${reqResult.reason || 'Not eligible'}`,
+          buildReferralDashboardKeyboard(updatedDash)
+        );
+      }
+      return customer;
+    }
+
+    if (data === 'action_back_main_menu') {
+      await sendTelegramMessage(
+        chatId,
+        BOT_MESSAGES.mainMenuGreeting(),
+        MAIN_MENU_INLINE_KEYBOARD
+      );
+      return customer;
+    }
+
     if (data === 'menu_terms') {
       await handleTermsTrigger(customer);
       return customer;
@@ -514,7 +680,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
     return customer;
   }
 
-  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /terms, /enter, /support)
+  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support)
   if (update.message && typeof update.message.text === 'string') {
     const msg = update.message;
     const userId = String(msg.from?.id || msg.chat.id);
@@ -596,6 +762,15 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Cust
       text === '🏆 Prize Details'
     ) {
       await handlePrizeDetailsTrigger(customer);
+      return customer;
+    }
+
+    if (
+      command === '/refer' ||
+      command === '/referral' ||
+      text === '🎁 Refer & Earn'
+    ) {
+      await handleReferAndEarnTrigger(customer);
       return customer;
     }
 

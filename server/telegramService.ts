@@ -12,6 +12,7 @@ import {
   InlineKeyboardMarkup,
   OutgoingBotMessage,
   ReplyKeyboardMarkup,
+  WithdrawalRequest,
 } from './types';
 
 export const MAIN_MENU_INLINE_KEYBOARD: InlineKeyboardMarkup = {
@@ -21,6 +22,7 @@ export const MAIN_MENU_INLINE_KEYBOARD: InlineKeyboardMarkup = {
       { text: '🎁 इनाम देखें | View Prizes', callback_data: 'menu_prize_details' },
       { text: '🎫 मेरा टिकट | My Ticket', callback_data: 'menu_my_ticket' },
     ],
+    [{ text: '🎁 Refer & Earn', callback_data: 'menu_refer_earn' }],
     [
       { text: '📜 नियम और शर्तें | Terms & Conditions', callback_data: 'menu_terms' },
       { text: '📞 सहायता | Support', callback_data: 'menu_support' },
@@ -32,6 +34,7 @@ export const MAIN_MENU_REPLY_KEYBOARD: ReplyKeyboardMarkup = {
   keyboard: [
     [{ text: '🎟️ अभी जुड़ें | Join Now' }],
     [{ text: '🎁 इनाम देखें | View Prizes' }, { text: '🎫 मेरा टिकट | My Ticket' }],
+    [{ text: '🎁 Refer & Earn' }],
     [{ text: '📜 नियम और शर्तें | Terms & Conditions' }, { text: '📞 सहायता | Support' }],
   ],
   resize_keyboard: true,
@@ -290,8 +293,19 @@ export async function notifyAdminVerifiedPayment(params: {
   ticketNumber: string;
   paymentId: string;
   chargeId?: string;
+  referralBonusCredited?: boolean;
+  referrer?: CustomerRecord | null;
+  bonusAdded?: number;
 }) {
-  const { customer, ticketNumber, paymentId, chargeId } = params;
+  const {
+    customer,
+    ticketNumber,
+    paymentId,
+    chargeId,
+    referralBonusCredited,
+    referrer,
+    bonusAdded,
+  } = params;
   const dedupKey = `verified_payment_${paymentId}_${ticketNumber}`;
 
   const lines = [
@@ -305,12 +319,66 @@ export async function notifyAdminVerifiedPayment(params: {
     `🆔 Telegram User ID: ${customer.telegram_user_id}`,
     `📱 Mobile (Masked): ${maskPhoneNumberForAdmin(customer.phone)}`,
     `🔗 Customer Referral Code: ${customer.referral_code} (Referrals: ${customer.referral_count || 0})`,
-    customer.referred_by ? `🤝 Referred By: ${customer.referred_by}` : null,
+    customer.referred_by
+      ? `🤝 Referred By: ${customer.referred_by}${
+          referralBonusCredited && referrer
+            ? ` (Credited +${bonusAdded || 0} Stars to ${referrer.telegram_user_id})`
+            : ''
+        }`
+      : null,
     `🕒 Confirmed At: ${new Date().toISOString()}`,
   ].filter(Boolean);
 
   return sendAdminGroupNotification({
     eventType: 'PAYMENT_VERIFIED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+export async function notifyAdminWithdrawalRequested(params: {
+  customer: CustomerRecord;
+  request: WithdrawalRequest;
+}) {
+  const { customer, request } = params;
+  const dedupKey = `withdrawal_req_${request.id}`;
+  const lines = [
+    '🏦 NEW WITHDRAWAL REQUEST — DiwaliBigdeal',
+    '',
+    `🆔 Request ID: ${request.id}`,
+    `👤 User ID: ${customer.telegram_user_id} (${customer.name || 'Customer'})`,
+    `🔗 Referral Code: ${request.referral_code}`,
+    `💰 Requested Amount: ${request.amount} Stars`,
+    `📌 Status: ${request.status}`,
+    `🕒 Requested At: ${request.created_at}`,
+  ];
+
+  return sendAdminGroupNotification({
+    eventType: 'WITHDRAWAL_REQUESTED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+export async function notifyAdminWithdrawalStatusChanged(params: {
+  request: WithdrawalRequest;
+}) {
+  const { request } = params;
+  const dedupKey = `withdrawal_status_${request.id}_${request.status}_${request.updated_at}`;
+  const lines = [
+    '🔄 WITHDRAWAL STATUS UPDATED — DiwaliBigdeal',
+    '',
+    `🆔 Request ID: ${request.id}`,
+    `👤 User ID: ${request.telegram_user_id}`,
+    `🔗 Referral Code: ${request.referral_code}`,
+    `💰 Amount: ${request.amount} Stars`,
+    `📌 New Status: ${request.status}`,
+    request.payout_reference ? `🧾 Payout Ref: ${request.payout_reference}` : null,
+    `🕒 Updated At: ${request.updated_at}`,
+  ].filter(Boolean);
+
+  return sendAdminGroupNotification({
+    eventType: 'WITHDRAWAL_STATUS_CHANGED',
     dedupKey,
     text: lines.join('\n'),
   });
@@ -484,6 +552,7 @@ export async function ensureTelegramWebhookRegistered(forceSync = false) {
           { command: 'enter', description: 'अभी जुड़ें | Join Entry (₹199)' },
           { command: 'prizes', description: 'इनाम देखें | View Prizes' },
           { command: 'ticket', description: 'मेरा टिकट देखें | View My Ticket' },
+          { command: 'refer', description: '🎁 Refer & Earn Dashboard' },
           { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
           { command: 'support', description: 'सहायता | Customer Support' },
         ],

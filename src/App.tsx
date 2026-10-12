@@ -46,6 +46,22 @@ interface CustomerRecord {
   payment_status: 'UNPAID' | 'PENDING' | 'PAID' | 'FAILED';
   payment_amount: number;
   ticket_number: string | null;
+  referral_code?: string;
+  referred_by?: string | null;
+  referral_count?: number;
+  verified_referral_count?: number;
+  verified_referral_bonus?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface WithdrawalRequest {
+  id: string;
+  telegram_user_id: string;
+  referral_code: string;
+  amount: number;
+  status: 'PENDING_APPROVAL' | 'APPROVED_PENDING_PAYOUT' | 'PAID' | 'REJECTED';
+  payout_reference: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +85,10 @@ interface OverviewResponse {
     prizeAnnouncement: string;
     telegramBotTokenConfigured: boolean;
     telegramWebhookSecretConfigured: boolean;
+    telegramAdminChatConfigured?: boolean;
+    botUsername?: string;
+    referralProgramEnabled?: boolean;
+    referralWithdrawalsEnabled?: boolean;
     paymentProvider: string;
     paymentCredentialsConfigured: boolean;
     paymentWebhookSecretConfigured: boolean;
@@ -79,9 +99,12 @@ interface OverviewResponse {
     totalCustomers: number;
     confirmedTickets: number;
     pendingPayments: number;
+    totalReferrals?: number;
+    pendingWithdrawals?: number;
     totalStarsCollected?: number;
   };
   customers: CustomerRecord[];
+  withdrawalRequests?: WithdrawalRequest[];
   logs: SystemLogEntry[];
   sqlSchema: string;
 }
@@ -388,6 +411,23 @@ export default function App() {
     setTimeout(() => setCopiedKey(null), 1800);
   };
 
+  const handleUpdateWithdrawalStatus = async (
+    withdrawalId: string,
+    status: 'PENDING_APPROVAL' | 'APPROVED_PENDING_PAYOUT' | 'PAID' | 'REJECTED',
+    payoutReference?: string
+  ) => {
+    try {
+      await fetch(`/api/admin/withdrawal/${withdrawalId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, payout_reference: payoutReference }),
+      });
+      await fetchOverview();
+    } catch (err) {
+      console.error('Failed to update withdrawal status:', err);
+    }
+  };
+
   const filteredCustomers = (overview?.customers || []).filter((c) => {
     const matchesState = stateFilter === 'ALL' || c.conversation_state === stateFilter;
     const q = searchQuery.toLowerCase().trim();
@@ -679,6 +719,15 @@ export default function App() {
                     className="py-1.5 px-2 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-slate-200 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
                   >
                     🎫 मेरा टिकट | My Ticket
+                  </button>
+                  <button
+                    disabled={sendingUpdate}
+                    onClick={() =>
+                      dispatchTelegramTextUpdate(simUserId, '🎁 Refer & Earn')
+                    }
+                    className="col-span-2 py-1.5 px-3 bg-[#242F3D] hover:bg-[#2E3C4E] text-xs font-medium text-amber-300 rounded border border-slate-700/70 transition-colors whitespace-nowrap"
+                  >
+                    🎁 Refer &amp; Earn
                   </button>
                   <button
                     disabled={sendingUpdate}
@@ -1071,7 +1120,9 @@ export default function App() {
                       <th className="py-3 px-4">conversation_state</th>
                       <th className="py-3 px-4">payment_id</th>
                       <th className="py-3 px-4">payment_status</th>
-                      <th className="py-3 px-4 text-right">stars_amount</th>
+                      <th className="py-3 px-4">referral_code</th>
+                      <th className="py-3 px-4">referred_by</th>
+                      <th className="py-3 px-4 text-right">referrals</th>
                       <th className="py-3 px-4">ticket_number</th>
                       <th className="py-3 px-4 text-right">updated_at</th>
                       <th className="py-3 px-4 text-right">Action</th>
@@ -1080,7 +1131,7 @@ export default function App() {
                   <tbody className="divide-y divide-slate-800/70 font-mono tabular-nums">
                     {filteredCustomers.length === 0 ? (
                       <tr>
-                        <td colSpan={11} className="py-8 text-center text-slate-500 font-sans">
+                        <td colSpan={13} className="py-8 text-center text-slate-500 font-sans">
                           No customer records match the current filter.
                         </td>
                       </tr>
@@ -1110,8 +1161,14 @@ export default function App() {
                               {cust.payment_status}
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-right text-amber-300">
-                            {cust.payment_amount} ⭐️
+                          <td className="py-3 px-4 text-amber-300">
+                            {cust.referral_code || '—'}
+                          </td>
+                          <td className="py-3 px-4 text-slate-400">
+                            {cust.referred_by || '—'}
+                          </td>
+                          <td className="py-3 px-4 text-right text-sky-300">
+                            {cust.referral_count ?? 0} (✓{cust.verified_referral_count ?? 0})
                           </td>
                           <td className="py-3 px-4 text-emerald-400 font-semibold">
                             {cust.ticket_number || '—'}
@@ -1133,6 +1190,102 @@ export default function App() {
                             >
                               Inspect Chat
                             </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Admin Withdrawal Approval & Payout Ledger */}
+            <div className="bg-[#1E293B] border border-slate-800 rounded-xl p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="text-base font-semibold text-white">
+                    Referral Withdrawal Requests (Admin Review &amp; Payout Ledger)
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Withdrawals start as <code className="text-amber-400">PENDING_APPROVAL</code> and are never marked <code className="text-emerald-400">PAID</code> automatically. Feature flags: <code className="text-slate-200">REFERRAL_PROGRAM_ENABLED={String(overview?.config.referralProgramEnabled ?? false)}</code>, <code className="text-slate-200">REFERRAL_WITHDRAWALS_ENABLED={String(overview?.config.referralWithdrawalsEnabled ?? false)}</code>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-800 rounded-lg">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-900/80 text-slate-400 font-medium">
+                      <th className="py-3 px-4">request_id</th>
+                      <th className="py-3 px-4">telegram_user_id</th>
+                      <th className="py-3 px-4">referral_code</th>
+                      <th className="py-3 px-4 text-right">amount</th>
+                      <th className="py-3 px-4">status</th>
+                      <th className="py-3 px-4">payout_reference</th>
+                      <th className="py-3 px-4 text-right">created_at</th>
+                      <th className="py-3 px-4 text-right">Admin Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70 font-mono tabular-nums">
+                    {!overview?.withdrawalRequests || overview.withdrawalRequests.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-6 text-center text-slate-500 font-sans">
+                          No withdrawal requests submitted yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      overview.withdrawalRequests.map((w) => (
+                        <tr key={w.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="py-3 px-4 text-white font-semibold">{w.id}</td>
+                          <td className="py-3 px-4 text-slate-200">{w.telegram_user_id}</td>
+                          <td className="py-3 px-4 text-amber-300">{w.referral_code}</td>
+                          <td className="py-3 px-4 text-right text-emerald-400">{w.amount} Stars</td>
+                          <td className="py-3 px-4">
+                            <span
+                              className={
+                                w.status === 'PAID'
+                                  ? 'text-emerald-400 font-semibold'
+                                  : w.status === 'REJECTED'
+                                  ? 'text-red-400'
+                                  : 'text-amber-400'
+                              }
+                            >
+                              {w.status}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-300">{w.payout_reference || '—'}</td>
+                          <td className="py-3 px-4 text-right text-slate-400">
+                            {new Date(w.created_at).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4 text-right font-sans">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() =>
+                                  handleUpdateWithdrawalStatus(w.id, 'APPROVED_PENDING_PAYOUT')
+                                }
+                                className="px-2 py-1 bg-sky-900/50 hover:bg-sky-800/70 text-sky-200 border border-sky-700/60 rounded text-[11px] whitespace-nowrap"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() =>
+                                  handleUpdateWithdrawalStatus(
+                                    w.id,
+                                    'PAID',
+                                    `PAYOUT-${w.id}`
+                                  )
+                                }
+                                className="px-2 py-1 bg-emerald-900/50 hover:bg-emerald-800/70 text-emerald-200 border border-emerald-700/60 rounded text-[11px] whitespace-nowrap"
+                              >
+                                Mark Paid
+                              </button>
+                              <button
+                                onClick={() => handleUpdateWithdrawalStatus(w.id, 'REJECTED')}
+                                className="px-2 py-1 bg-red-900/50 hover:bg-red-800/70 text-red-200 border border-red-700/60 rounded text-[11px] whitespace-nowrap"
+                              >
+                                Reject
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))

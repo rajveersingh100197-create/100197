@@ -12,6 +12,7 @@ import {
   ensureTelegramWebhookRegistered,
   getSafeTelegramWebhookDiagnostics,
   MAIN_MENU_INLINE_KEYBOARD,
+  notifyAdminWithdrawalStatusChanged,
   sendTelegramMessage,
   sendTestMessageToAdminGroup,
   validateAdminGroupChatId,
@@ -23,7 +24,7 @@ import {
   processVerifiedPaymentWebhook,
   verifyPaymentWebhookSignature,
 } from './paymentService';
-import { TelegramUpdate } from './types';
+import { TelegramUpdate, WithdrawalStatus } from './types';
 
 export const app = express();
 
@@ -79,7 +80,7 @@ app.all('/api/telegram/status', async (req: Request, res: Response) => {
     payment_mode: 'telegram_stars (XTR)',
     currency: 'XTR',
     stars_amount: 100,
-    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
+    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/refer', '/terms', '/support'],
     webhook_auto_synced: Boolean(syncResult.synced),
     webhook_registration: diagnostics,
     timestamp: new Date().toISOString(),
@@ -105,7 +106,7 @@ app.get('/api/telegram/webhook', async (req: Request, res: Response) => {
     endpoint: '/api/telegram/webhook',
     status: 'READY',
     supported_methods: ['POST', 'GET'],
-    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
+    supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/refer', '/terms', '/support'],
     supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
     payment_mode: 'telegram_stars (XTR)',
     currency: 'XTR',
@@ -334,6 +335,7 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
   const customers = db.listAllCustomers();
   const logs = logger.getRecentLogs(80);
   const adminNotifications = db.getRecentAdminNotifications(50);
+  const withdrawalRequests = db.listAllWithdrawalRequests();
   const configStatus = getPublicConfigStatus();
   const adminCheck = validateAdminGroupChatId();
 
@@ -342,6 +344,9 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
     confirmedTickets: customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length,
     pendingPayments: customers.filter((c) => c.payment_status === 'PENDING').length,
     totalReferrals: customers.reduce((sum, c) => sum + (c.referral_count || 0), 0),
+    pendingWithdrawals: withdrawalRequests.filter(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    ).length,
     totalStarsCollected:
       customers.filter((c) => c.payment_status === 'PAID' && c.ticket_number).length * 100,
   };
@@ -354,10 +359,61 @@ app.get('/api/admin/overview', (_req: Request, res: Response) => {
     },
     stats,
     customers,
+    withdrawalRequests,
     adminNotifications,
     logs,
     sqlSchema: db.getSQLSchemaDDL(),
   });
+});
+
+app.get('/api/admin/referrals/:userId', (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const dashboard = db.getCustomerReferralDashboard(String(userId));
+  return res.status(200).json({
+    ok: true,
+    dashboard,
+  });
+});
+
+app.post('/api/admin/withdrawal/:id/status', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, payout_reference } = (req.body || {}) as {
+      status?: WithdrawalStatus;
+      payout_reference?: string;
+    };
+
+    const allowedStatuses: WithdrawalStatus[] = [
+      'PENDING_APPROVAL',
+      'APPROVED_PENDING_PAYOUT',
+      'PAID',
+      'REJECTED',
+    ];
+    if (!status || !allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid withdrawal status. Must be one of: ${allowedStatuses.join(', ')}`,
+      });
+    }
+
+    const updated = db.updateWithdrawalStatus(id, status, payout_reference);
+    if (!updated) {
+      return res.status(404).json({ ok: false, error: `Withdrawal request ${id} not found` });
+    }
+
+    await notifyAdminWithdrawalStatusChanged({ request: updated });
+
+    return res.status(200).json({
+      ok: true,
+      withdrawal: updated,
+      withdrawalRequests: db.listAllWithdrawalRequests(),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to update withdrawal status',
+    });
+  }
 });
 
 app.post('/api/admin/test-notification', async (req: Request, res: Response) => {

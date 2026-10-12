@@ -26,6 +26,16 @@ function getConfig() {
     PRIZE_ANNOUNCEMENT_TIME: '11:59 PM IST',
     TELEGRAM_BOT_TOKEN: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
     TELEGRAM_WEBHOOK_SECRET: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
+    TELEGRAM_ADMIN_CHAT_ID: (process.env.TELEGRAM_ADMIN_CHAT_ID || '').trim(),
+    TELEGRAM_BOT_USERNAME: (process.env.TELEGRAM_BOT_USERNAME || 'DiwaliDhamaka2026Bot')
+      .trim()
+      .replace(/^@/, ''),
+    REFERRAL_PROGRAM_ENABLED:
+      String(process.env.REFERRAL_PROGRAM_ENABLED || 'false').toLowerCase() === 'true',
+    REFERRAL_WITHDRAWALS_ENABLED:
+      String(process.env.REFERRAL_WITHDRAWALS_ENABLED || 'false').toLowerCase() === 'true',
+    REFERRAL_BONUS_PER_VERIFIED_PAYMENT: 100,
+    REFERRAL_MIN_WITHDRAWAL_AMOUNT: 1000,
     PAYMENT_WEBHOOK_SECRET: (process.env.PAYMENT_WEBHOOK_SECRET || 'diwali_payment_secret_2026').trim(),
     DATABASE_PATH: process.env.DATABASE_PATH || '/tmp/diwalibigdeal/diwalibigdeal_store.json',
   };
@@ -45,6 +55,16 @@ function getPublicConfigStatus() {
     telegramWebhookSecretConfigured: Boolean(
       cfg.TELEGRAM_WEBHOOK_SECRET && cfg.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
     ),
+    telegramAdminChatConfigured: Boolean(
+      cfg.TELEGRAM_ADMIN_CHAT_ID &&
+        cfg.TELEGRAM_ADMIN_CHAT_ID !== 'YOUR_PRIVATE_ADMIN_GROUP_CHAT_ID' &&
+        /^-\d+$/.test(cfg.TELEGRAM_ADMIN_CHAT_ID)
+    ),
+    botUsername: cfg.TELEGRAM_BOT_USERNAME,
+    referralProgramEnabled: cfg.REFERRAL_PROGRAM_ENABLED,
+    referralWithdrawalsEnabled: cfg.REFERRAL_WITHDRAWALS_ENABLED,
+    referralBonusAmount: cfg.REFERRAL_BONUS_PER_VERIFIED_PAYMENT,
+    referralMinWithdrawal: cfg.REFERRAL_MIN_WITHDRAWAL_AMOUNT,
     paymentProvider: 'telegram_stars',
     paymentCredentialsConfigured: Boolean(
       cfg.TELEGRAM_BOT_TOKEN && cfg.TELEGRAM_BOT_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN'
@@ -88,12 +108,57 @@ const PaymentStatus = {
   FAILED: 'FAILED',
 };
 
+function generateReferralCode(telegramUserId) {
+  return crypto
+    .createHash('sha256')
+    .update(`diwalibigdeal_ref_${telegramUserId}`)
+    .digest('hex')
+    .slice(0, 6)
+    .toUpperCase();
+}
+
+function normalizeReferralCode(raw) {
+  return String(raw || '')
+    .trim()
+    .replace(/^(ref_|ref-)/i, '')
+    .toUpperCase();
+}
+
+function formatReferralLink(referralCode) {
+  const code = normalizeReferralCode(referralCode);
+  return `https://t.me/${getConfig().TELEGRAM_BOT_USERNAME}?start=ref_${code}`;
+}
+
+function maskCustomerIdentifier(customer) {
+  if (customer && customer.name && customer.name.trim().length >= 2) {
+    const parts = customer.name.trim().split(/\s+/);
+    const first = parts[0];
+    const maskedFirst =
+      first.length <= 2
+        ? `${first[0]}*`
+        : `${first.slice(0, 2)}${'*'.repeat(Math.min(4, first.length - 2))}`;
+    const lastInitial = parts.length > 1 ? ` ${parts[parts.length - 1][0]}.` : '';
+    return `${maskedFirst}${lastInitial} (ID: ***${String(customer.telegram_user_id).slice(-4)})`;
+  }
+  if (customer && customer.username) {
+    const clean = String(customer.username).replace(/^@/, '');
+    const prefix = clean.slice(0, 2);
+    return `@${prefix}*** (ID: ***${String(customer.telegram_user_id).slice(-4)})`;
+  }
+  return `User ***${String((customer && customer.telegram_user_id) || '0000').slice(-4)}`;
+}
+
 class DatabaseManager {
   constructor() {
     this.store = {
       customers: {},
       ticketSequence: 0,
       processedWebhooks: {},
+      processedAdminNotifications: {},
+      processedReferrals: {},
+      processedReferralBonuses: {},
+      withdrawalRequests: {},
+      adminNotifications: [],
       chatHistories: {},
       systemLogs: [],
       webhookTelemetry: {
@@ -123,6 +188,13 @@ class DatabaseManager {
           customers: parsed.customers || {},
           ticketSequence: typeof parsed.ticketSequence === 'number' ? parsed.ticketSequence : 0,
           processedWebhooks: parsed.processedWebhooks || {},
+          processedAdminNotifications: parsed.processedAdminNotifications || {},
+          processedReferrals: parsed.processedReferrals || {},
+          processedReferralBonuses: parsed.processedReferralBonuses || {},
+          withdrawalRequests: parsed.withdrawalRequests || {},
+          adminNotifications: Array.isArray(parsed.adminNotifications)
+            ? parsed.adminNotifications
+            : [],
           chatHistories: parsed.chatHistories || {},
           systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
           webhookTelemetry: parsed.webhookTelemetry || {
@@ -137,6 +209,14 @@ class DatabaseManager {
             total_updates_received: 0,
           },
         };
+        for (const uid of Object.keys(this.store.customers)) {
+          const c = this.store.customers[uid];
+          c.referral_code = normalizeReferralCode(c.referral_code) || generateReferralCode(uid);
+          c.referred_by = c.referred_by ? normalizeReferralCode(c.referred_by) : null;
+          if (typeof c.referral_count !== 'number') c.referral_count = 0;
+          if (typeof c.verified_referral_count !== 'number') c.verified_referral_count = 0;
+          if (typeof c.verified_referral_bonus !== 'number') c.verified_referral_bonus = 0;
+        }
       } else {
         this.seedDemoEntries();
         this.persist();
@@ -157,11 +237,30 @@ class DatabaseManager {
             ? parsed.ticketSequence
             : this.store.ticketSequence;
         this.store.processedWebhooks = parsed.processedWebhooks || this.store.processedWebhooks;
+        this.store.processedAdminNotifications =
+          parsed.processedAdminNotifications || this.store.processedAdminNotifications || {};
+        this.store.processedReferrals =
+          parsed.processedReferrals || this.store.processedReferrals || {};
+        this.store.processedReferralBonuses =
+          parsed.processedReferralBonuses || this.store.processedReferralBonuses || {};
+        this.store.withdrawalRequests =
+          parsed.withdrawalRequests || this.store.withdrawalRequests || {};
+        this.store.adminNotifications = Array.isArray(parsed.adminNotifications)
+          ? parsed.adminNotifications
+          : this.store.adminNotifications || [];
         this.store.chatHistories = parsed.chatHistories || this.store.chatHistories;
         this.store.systemLogs = Array.isArray(parsed.systemLogs)
           ? parsed.systemLogs
           : this.store.systemLogs;
         this.store.webhookTelemetry = parsed.webhookTelemetry || this.store.webhookTelemetry;
+        for (const uid of Object.keys(this.store.customers)) {
+          const c = this.store.customers[uid];
+          c.referral_code = normalizeReferralCode(c.referral_code) || generateReferralCode(uid);
+          c.referred_by = c.referred_by ? normalizeReferralCode(c.referred_by) : null;
+          if (typeof c.referral_count !== 'number') c.referral_count = 0;
+          if (typeof c.verified_referral_count !== 'number') c.verified_referral_count = 0;
+          if (typeof c.verified_referral_bonus !== 'number') c.verified_referral_bonus = 0;
+        }
       }
     } catch (_err) {
       // Ignore read errors
@@ -172,9 +271,13 @@ class DatabaseManager {
     const now = new Date(Date.now() - 3600 * 1000 * 5).toISOString();
     const recent = new Date(Date.now() - 1800 * 1000).toISOString();
 
+    const demo1Code = generateReferralCode('918820144');
+    const demo2Code = generateReferralCode('917451902');
+
     const demo1 = {
       telegram_user_id: '918820144',
       telegram_chat_id: '918820144',
+      username: 'aarav_sharma',
       name: 'Aarav Sharma',
       phone: '9876543210',
       address: 'Flat 402, Lotus Enclave, Indiranagar, Bengaluru, Karnataka - 560038',
@@ -183,6 +286,13 @@ class DatabaseManager {
       payment_status: PaymentStatus.PAID,
       payment_amount: 100,
       ticket_number: 'DB2026-000001',
+      referral_code: demo1Code,
+      referred_by: null,
+      referred_by_user_id: null,
+      referred_at: null,
+      referral_count: 1,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: now,
       updated_at: recent,
     };
@@ -190,6 +300,7 @@ class DatabaseManager {
     const demo2 = {
       telegram_user_id: '917451902',
       telegram_chat_id: '917451902',
+      username: 'priya_nair',
       name: 'Priya Nair',
       phone: '9820112233',
       address: 'B-18, Shanti Niketan, Bandra West, Mumbai, Maharashtra - 400050',
@@ -198,6 +309,13 @@ class DatabaseManager {
       payment_status: PaymentStatus.PENDING,
       payment_amount: 100,
       ticket_number: null,
+      referral_code: demo2Code,
+      referred_by: demo1Code,
+      referred_by_user_id: demo1.telegram_user_id,
+      referred_at: recent,
+      referral_count: 0,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: recent,
       updated_at: recent,
     };
@@ -206,6 +324,7 @@ class DatabaseManager {
     this.store.customers[demo2.telegram_user_id] = demo2;
     this.store.ticketSequence = 1;
     this.store.processedWebhooks[demo1.payment_id] = demo1.ticket_number;
+    this.store.processedReferrals[demo2.telegram_user_id] = demo1.referral_code;
   }
 
   persist() {
@@ -250,14 +369,27 @@ class DatabaseManager {
     return this.store.webhookTelemetry || {};
   }
 
-  getOrCreateCustomer(telegramUserId, telegramChatId) {
+  getOrCreateCustomer(telegramUserId, telegramChatId, username) {
     this.reloadFromDisk();
     const uid = String(telegramUserId);
     const cid = String(telegramChatId);
     const existing = this.store.customers[uid];
     if (existing) {
+      let changed = false;
       if (existing.telegram_chat_id !== cid) {
         existing.telegram_chat_id = cid;
+        changed = true;
+      }
+      if (username && existing.username !== username) {
+        existing.username = username;
+        changed = true;
+      }
+      const canonicalCode = normalizeReferralCode(existing.referral_code) || generateReferralCode(uid);
+      if (existing.referral_code !== canonicalCode) {
+        existing.referral_code = canonicalCode;
+        changed = true;
+      }
+      if (changed) {
         existing.updated_at = new Date().toISOString();
         this.persist();
       }
@@ -268,6 +400,7 @@ class DatabaseManager {
     const record = {
       telegram_user_id: uid,
       telegram_chat_id: cid,
+      username: username || null,
       name: null,
       phone: null,
       address: null,
@@ -276,6 +409,13 @@ class DatabaseManager {
       payment_status: PaymentStatus.UNPAID,
       payment_amount: 100,
       ticket_number: null,
+      referral_code: generateReferralCode(uid),
+      referred_by: null,
+      referred_by_user_id: null,
+      referred_at: null,
+      referral_count: 0,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: now,
       updated_at: now,
     };
@@ -289,6 +429,327 @@ class DatabaseManager {
     this.reloadFromDisk();
     const rec = this.store.customers[String(telegramUserId)];
     return rec ? { ...rec } : null;
+  }
+
+  getCustomerByReferralCode(referralCode) {
+    this.reloadFromDisk();
+    const clean = normalizeReferralCode(referralCode);
+    if (!clean) return null;
+    for (const key of Object.keys(this.store.customers)) {
+      const cust = this.store.customers[key];
+      if (cust.referral_code && normalizeReferralCode(cust.referral_code) === clean) {
+        return { ...cust };
+      }
+    }
+    return null;
+  }
+
+  applyReferralCodeOnce(referredUserId, rawReferralCode) {
+    this.reloadFromDisk();
+    const uid = String(referredUserId);
+    const code = normalizeReferralCode(rawReferralCode);
+    if (!code) {
+      return { applied: false, referrer: null, reason: 'empty_code' };
+    }
+
+    if (!this.store.processedReferrals) {
+      this.store.processedReferrals = {};
+    }
+    if (this.store.processedReferrals[uid]) {
+      return { applied: false, referrer: null, reason: 'already_referred' };
+    }
+
+    const referredCustomer = this.store.customers[uid];
+    if (!referredCustomer) {
+      return { applied: false, referrer: null, reason: 'user_not_found' };
+    }
+
+    if (referredCustomer.referred_by) {
+      return { applied: false, referrer: null, reason: 'already_has_referrer' };
+    }
+
+    const referrer = this.getCustomerByReferralCode(code);
+    if (!referrer) {
+      return { applied: false, referrer: null, reason: 'invalid_referral_code' };
+    }
+
+    if (referrer.telegram_user_id === uid) {
+      return { applied: false, referrer: null, reason: 'self_referral_not_allowed' };
+    }
+
+    const now = new Date().toISOString();
+    const targetCustomer = this.store.customers[uid];
+    targetCustomer.referred_by = referrer.referral_code;
+    targetCustomer.referred_by_user_id = referrer.telegram_user_id;
+    targetCustomer.referred_at = now;
+    targetCustomer.updated_at = now;
+
+    const referrerRecord = this.store.customers[referrer.telegram_user_id];
+    referrerRecord.referral_count = (referrerRecord.referral_count || 0) + 1;
+    referrerRecord.updated_at = now;
+
+    this.store.processedReferrals[uid] = referrer.referral_code;
+    this.persist();
+
+    return { applied: true, referrer: { ...referrerRecord } };
+  }
+
+  creditVerifiedReferralOnPayment(referredUserId, paymentId) {
+    this.reloadFromDisk();
+    const uid = String(referredUserId);
+    const pid = String(paymentId || '').trim();
+    if (!pid) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+    if (!this.store.processedReferralBonuses) {
+      this.store.processedReferralBonuses = {};
+    }
+    if (this.store.processedReferralBonuses[pid]) {
+      const existingRefId = this.store.processedReferralBonuses[pid];
+      return {
+        credited: false,
+        referrer: this.getCustomerByUserId(existingRefId),
+        bonusAdded: 0,
+      };
+    }
+
+    const referredCustomer = this.store.customers[uid];
+    if (!referredCustomer || !referredCustomer.referred_by) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const referrer = this.getCustomerByReferralCode(referredCustomer.referred_by);
+    if (!referrer || referrer.telegram_user_id === uid) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const referrerRecord = this.store.customers[referrer.telegram_user_id];
+    if (!referrerRecord) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const cfg = getConfig();
+    const bonusPerVerified = cfg.REFERRAL_PROGRAM_ENABLED
+      ? cfg.REFERRAL_BONUS_PER_VERIFIED_PAYMENT
+      : 0;
+
+    referrerRecord.verified_referral_count = (referrerRecord.verified_referral_count || 0) + 1;
+    referrerRecord.verified_referral_bonus =
+      (referrerRecord.verified_referral_bonus || 0) + bonusPerVerified;
+    referrerRecord.updated_at = new Date().toISOString();
+
+    this.store.processedReferralBonuses[pid] = referrerRecord.telegram_user_id;
+    this.persist();
+
+    return {
+      credited: true,
+      referrer: { ...referrerRecord },
+      bonusAdded: bonusPerVerified,
+    };
+  }
+
+  getCustomerReferralDashboard(telegramUserId) {
+    this.reloadFromDisk();
+    const cfg = getConfig();
+    const uid = String(telegramUserId);
+    const customer = this.store.customers[uid];
+    const referralCode = customer
+      ? normalizeReferralCode(customer.referral_code) || generateReferralCode(uid)
+      : generateReferralCode(uid);
+    const referralLink = formatReferralLink(referralCode);
+
+    const referredCustomers = Object.values(this.store.customers)
+      .filter(
+        (c) =>
+          c.telegram_user_id !== uid &&
+          c.referred_by &&
+          normalizeReferralCode(c.referred_by) === referralCode
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.referred_at || b.created_at).getTime() -
+          new Date(a.referred_at || a.created_at).getTime()
+      );
+
+    const totalReferredUsers = referredCustomers.length;
+    const registeredReferredUsers = referredCustomers.filter((c) =>
+      Boolean(c.name && c.phone && c.address)
+    ).length;
+    const verifiedReferredPayments = referredCustomers.filter(
+      (c) => c.payment_status === PaymentStatus.PAID && Boolean(c.ticket_number)
+    ).length;
+    const pendingReferredPayments = referredCustomers.filter(
+      (c) => c.payment_status !== PaymentStatus.PAID || !c.ticket_number
+    ).length;
+
+    const bonusPerVerified = cfg.REFERRAL_PROGRAM_ENABLED
+      ? cfg.REFERRAL_BONUS_PER_VERIFIED_PAYMENT
+      : 0;
+    const totalVerifiedBonus = verifiedReferredPayments * bonusPerVerified;
+
+    if (this.store.customers[uid]) {
+      this.store.customers[uid].referral_count = totalReferredUsers;
+      this.store.customers[uid].verified_referral_count = verifiedReferredPayments;
+      this.store.customers[uid].verified_referral_bonus = totalVerifiedBonus;
+    }
+
+    const userWithdrawals = Object.values(this.store.withdrawalRequests || {})
+      .filter((w) => w.telegram_user_id === uid)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    const lockedOrPaidWithdrawalAmount = userWithdrawals
+      .filter((w) => w.status !== 'REJECTED')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    const availableWithdrawalBalance = Math.max(
+      0,
+      totalVerifiedBonus - lockedOrPaidWithdrawalAmount
+    );
+
+    const hasActivePendingWithdrawal = userWithdrawals.some(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+
+    const canRequestWithdrawal =
+      cfg.REFERRAL_PROGRAM_ENABLED &&
+      cfg.REFERRAL_WITHDRAWALS_ENABLED &&
+      availableWithdrawalBalance >= cfg.REFERRAL_MIN_WITHDRAWAL_AMOUNT &&
+      !hasActivePendingWithdrawal;
+
+    const paidWithdrawalsTotal = userWithdrawals
+      .filter((w) => w.status === 'PAID')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    let remainingPaidPool = paidWithdrawalsTotal;
+
+    const history = referredCustomers.map((rc) => {
+      const regDone = Boolean(rc.name && rc.phone && rc.address);
+      const isVerifiedPaid =
+        rc.payment_status === PaymentStatus.PAID && Boolean(rc.ticket_number);
+      const paymentStatusLabel = isVerifiedPaid
+        ? 'Verified'
+        : rc.payment_status === PaymentStatus.FAILED
+        ? 'Failed'
+        : 'Pending';
+
+      let bonusStatusLabel = 'Pending';
+      if (isVerifiedPaid && cfg.REFERRAL_PROGRAM_ENABLED) {
+        if (remainingPaidPool >= bonusPerVerified && bonusPerVerified > 0) {
+          bonusStatusLabel = 'Paid';
+          remainingPaidPool -= bonusPerVerified;
+        } else {
+          bonusStatusLabel = 'Eligible';
+        }
+      }
+
+      return {
+        masked_identifier: maskCustomerIdentifier(rc),
+        referred_at: rc.referred_at || rc.created_at,
+        registration_completed: regDone,
+        payment_status_label: paymentStatusLabel,
+        bonus_status_label: bonusStatusLabel,
+        bonus_amount: isVerifiedPaid ? bonusPerVerified : 0,
+      };
+    });
+
+    return {
+      referral_code: referralCode,
+      referral_link: referralLink,
+      referred_by: (customer && customer.referred_by) || null,
+      referral_program_enabled: cfg.REFERRAL_PROGRAM_ENABLED,
+      withdrawals_enabled: cfg.REFERRAL_WITHDRAWALS_ENABLED,
+      total_referred_users: totalReferredUsers,
+      registered_referred_users: registeredReferredUsers,
+      verified_referred_payments: verifiedReferredPayments,
+      pending_referred_payments: pendingReferredPayments,
+      total_verified_bonus: totalVerifiedBonus,
+      locked_or_paid_withdrawal_amount: lockedOrPaidWithdrawalAmount,
+      available_withdrawal_balance: availableWithdrawalBalance,
+      can_request_withdrawal: canRequestWithdrawal,
+      min_withdrawal_amount: cfg.REFERRAL_MIN_WITHDRAWAL_AMOUNT,
+      withdrawal_requests: userWithdrawals,
+      history,
+    };
+  }
+
+  createWithdrawalRequest(telegramUserId) {
+    this.reloadFromDisk();
+    const cfg = getConfig();
+    const uid = String(telegramUserId);
+    if (!cfg.REFERRAL_PROGRAM_ENABLED || !cfg.REFERRAL_WITHDRAWALS_ENABLED) {
+      return {
+        ok: false,
+        reason: 'Referral withdrawals are currently disabled by campaign configuration.',
+      };
+    }
+
+    const dashboard = this.getCustomerReferralDashboard(uid);
+    const activePending = dashboard.withdrawal_requests.find(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+    if (activePending) {
+      return {
+        ok: false,
+        request: activePending,
+        reason: `You already have an active withdrawal request (${activePending.id}) in status ${activePending.status}.`,
+      };
+    }
+
+    if (dashboard.available_withdrawal_balance < cfg.REFERRAL_MIN_WITHDRAWAL_AMOUNT) {
+      return {
+        ok: false,
+        reason: `Minimum eligible balance of ${cfg.REFERRAL_MIN_WITHDRAWAL_AMOUNT} Stars is required to request withdrawal (Available: ${dashboard.available_withdrawal_balance} Stars).`,
+      };
+    }
+
+    const now = new Date().toISOString();
+    const reqId = `WD-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const withdrawal = {
+      id: reqId,
+      telegram_user_id: uid,
+      referral_code: dashboard.referral_code,
+      amount: dashboard.available_withdrawal_balance,
+      status: 'PENDING_APPROVAL',
+      payout_reference: null,
+      created_at: now,
+      updated_at: now,
+    };
+
+    if (!this.store.withdrawalRequests) {
+      this.store.withdrawalRequests = {};
+    }
+    this.store.withdrawalRequests[reqId] = withdrawal;
+    this.persist();
+
+    return { ok: true, request: { ...withdrawal } };
+  }
+
+  hasAdminNotificationBeenSent(dedupKey) {
+    this.reloadFromDisk();
+    return Boolean(
+      this.store.processedAdminNotifications && this.store.processedAdminNotifications[dedupKey]
+    );
+  }
+
+  markAdminNotificationSent(entry) {
+    this.reloadFromDisk();
+    if (!this.store.processedAdminNotifications) {
+      this.store.processedAdminNotifications = {};
+    }
+    if (!Array.isArray(this.store.adminNotifications)) {
+      this.store.adminNotifications = [];
+    }
+    this.store.processedAdminNotifications[entry.dedup_key] = entry.created_at;
+    this.store.adminNotifications.unshift(entry);
+    if (this.store.adminNotifications.length > 100) {
+      this.store.adminNotifications = this.store.adminNotifications.slice(0, 100);
+    }
+    this.persist();
+  }
+
+  getRecentAdminNotifications(limit = 50) {
+    this.reloadFromDisk();
+    return (this.store.adminNotifications || []).slice(0, limit);
   }
 
   getCustomerByPaymentId(paymentId) {
@@ -384,6 +845,23 @@ class DatabaseManager {
     const uid = String(telegramUserId);
     delete this.store.customers[uid];
     delete this.store.chatHistories[uid];
+    if (this.store.processedReferrals) {
+      delete this.store.processedReferrals[uid];
+    }
+    if (this.store.withdrawalRequests) {
+      for (const wid of Object.keys(this.store.withdrawalRequests)) {
+        if (this.store.withdrawalRequests[wid].telegram_user_id === uid) {
+          delete this.store.withdrawalRequests[wid];
+        }
+      }
+    }
+    if (this.store.processedAdminNotifications) {
+      for (const k of Object.keys(this.store.processedAdminNotifications)) {
+        if (k.includes(uid)) {
+          delete this.store.processedAdminNotifications[k];
+        }
+      }
+    }
     this.persist();
   }
 }
@@ -416,7 +894,7 @@ const logger = {
 };
 
 // ============================================================================
-// 4. TELEGRAM BOT API & TELEGRAM STARS (100 XTR) SERVICE
+// 4. TELEGRAM BOT API, ADMIN GROUP NOTIFICATIONS & TELEGRAM STARS (100 XTR)
 // ============================================================================
 const MAIN_MENU_INLINE_KEYBOARD = {
   inline_keyboard: [
@@ -425,6 +903,7 @@ const MAIN_MENU_INLINE_KEYBOARD = {
       { text: '🎁 इनाम देखें | View Prizes', callback_data: 'menu_prize_details' },
       { text: '🎫 मेरा टिकट | My Ticket', callback_data: 'menu_my_ticket' },
     ],
+    [{ text: '🎁 Refer & Earn', callback_data: 'menu_refer_earn' }],
     [
       { text: '📜 नियम और शर्तें | Terms & Conditions', callback_data: 'menu_terms' },
       { text: '📞 सहायता | Support', callback_data: 'menu_support' },
@@ -438,6 +917,215 @@ function sanitizeSecretToken(raw) {
     .replace(/[^A-Za-z0-9_-]/g, '');
 }
 
+function validateAdminGroupChatId(rawChatId = getConfig().TELEGRAM_ADMIN_CHAT_ID) {
+  const cleaned = String(rawChatId || '').trim();
+  if (!cleaned || cleaned === 'YOUR_PRIVATE_ADMIN_GROUP_CHAT_ID') {
+    return {
+      valid: false,
+      chatId: '',
+      reason: 'TELEGRAM_ADMIN_CHAT_ID is not configured in environment variables.',
+    };
+  }
+  if (!/^-\d+$/.test(cleaned)) {
+    return {
+      valid: false,
+      chatId: '',
+      reason:
+        'TELEGRAM_ADMIN_CHAT_ID must be a negative numeric Telegram group/supergroup ID (e.g. -1001234567890). Never use a positive customer ID.',
+    };
+  }
+  return { valid: true, chatId: cleaned };
+}
+
+function maskPhoneNumberForAdmin(phone) {
+  const clean = String(phone || '').replace(/\D/g, '');
+  if (clean.length < 4) return 'Not provided';
+  const last4 = clean.slice(-4);
+  return `+91-XXXXXX${last4}`;
+}
+
+function summarizeAddressForAdmin(address) {
+  const clean = String(address || '').trim();
+  if (!clean) return 'Not provided';
+  const pinMatch = clean.match(/\b([1-9]\d{5})\b/);
+  const parts = clean
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const tail = parts.slice(-2).join(', ');
+  const summary = tail.length > 48 ? `${tail.slice(0, 48)}...` : tail;
+  if (pinMatch && !summary.includes(pinMatch[1])) {
+    return `${summary} (${pinMatch[1]})`;
+  }
+  return summary || 'Provided (Verified)';
+}
+
+async function sendAdminGroupNotification({ eventType, dedupKey, text, allowDuplicate = false }) {
+  if (!allowDuplicate && db.hasAdminNotificationBeenSent(dedupKey)) {
+    return {
+      ok: true,
+      skipped_duplicate: true,
+      delivered_to_telegram: false,
+      status: 'SKIPPED_DUPLICATE',
+    };
+  }
+
+  const adminChatValidation = validateAdminGroupChatId();
+  const token = getConfig().TELEGRAM_BOT_TOKEN;
+  let delivered = false;
+  let status = 'LOGGED_LOCALLY';
+
+  if (!adminChatValidation.valid) {
+    status = `NOT_CONFIGURED (${adminChatValidation.reason})`;
+  } else if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
+    status = 'BOT_TOKEN_NOT_CONFIGURED';
+  } else {
+    try {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: adminChatValidation.chatId,
+          text,
+          disable_web_page_preview: true,
+        }),
+      });
+      if (response.ok) {
+        delivered = true;
+        status = 'DELIVERED_TO_ADMIN_GROUP';
+      } else {
+        status = `TELEGRAM_HTTP_${response.status}`;
+      }
+    } catch (_err) {
+      status = 'NETWORK_ERROR';
+    }
+  }
+
+  const entry = {
+    id: crypto.randomUUID(),
+    dedup_key: dedupKey,
+    event_type: eventType,
+    text,
+    delivered_to_telegram: delivered,
+    telegram_status: status,
+    created_at: new Date().toISOString(),
+  };
+
+  db.markAdminNotificationSent(entry);
+  return {
+    ok: delivered || !adminChatValidation.valid,
+    delivered_to_telegram: delivered,
+    status,
+    entry,
+  };
+}
+
+async function notifyAdminNewBotStart({ customer, username, referralApplied, referrer }) {
+  const dedupKey = `bot_start_${customer.telegram_user_id}`;
+  const handle = username ? `@${String(username).replace(/^@/, '')}` : 'No username';
+  const lines = [
+    '🚀 NEW BOT START — DiwaliBigdeal',
+    '',
+    `👤 User ID: ${customer.telegram_user_id} (${handle})`,
+    `🔗 User Referral Code: ${customer.referral_code}`,
+    customer.referred_by
+      ? `🤝 Referred By Code: ${customer.referred_by}${
+          referralApplied && referrer
+            ? ` (Referrer Total Referrals: ${referrer.referral_count})`
+            : ''
+        }`
+      : '🤝 Referred By: Direct / Organic',
+    `🕒 Started At: ${new Date().toISOString()}`,
+  ];
+  return sendAdminGroupNotification({
+    eventType: 'BOT_START',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+async function notifyAdminRegistrationSubmitted(customer) {
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(`${customer.name || ''}|${customer.phone || ''}|${customer.address || ''}`)
+    .digest('hex')
+    .slice(0, 10);
+  const dedupKey = `reg_submit_${customer.telegram_user_id}_${fingerprint}`;
+  const lines = [
+    '📝 REGISTRATION DETAILS SUBMITTED — DiwaliBigdeal',
+    '',
+    `👤 Customer Name: ${customer.name || 'Not provided'}`,
+    `🆔 Telegram User ID: ${customer.telegram_user_id}`,
+    `📱 Mobile (Masked): ${maskPhoneNumberForAdmin(customer.phone)}`,
+    `📍 Location Summary: ${summarizeAddressForAdmin(customer.address)}`,
+    `🔗 Referral Code: ${customer.referral_code}`,
+    customer.referred_by ? `🤝 Referred By: ${customer.referred_by}` : null,
+    `🕒 Submitted At: ${new Date().toISOString()}`,
+  ].filter(Boolean);
+  return sendAdminGroupNotification({
+    eventType: 'REGISTRATION_SUBMITTED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+async function notifyAdminVerifiedPayment({
+  customer,
+  ticketNumber,
+  paymentId,
+  chargeId,
+  referralBonusCredited,
+  referrer,
+  bonusAdded,
+}) {
+  const dedupKey = `verified_payment_${paymentId}_${ticketNumber}`;
+  const lines = [
+    '💰 VERIFIED PAYMENT & TICKET ISSUED — DiwaliBigdeal',
+    '',
+    `🎫 Ticket ID: ${ticketNumber}`,
+    `✅ Payment Status: PAID (Server-Verified)`,
+    `💳 Payment ID: ${paymentId}`,
+    chargeId ? `🧾 Charge Ref: ${chargeId}` : null,
+    `👤 Customer Name: ${customer.name || 'Customer'}`,
+    `🆔 Telegram User ID: ${customer.telegram_user_id}`,
+    `📱 Mobile (Masked): ${maskPhoneNumberForAdmin(customer.phone)}`,
+    `🔗 Customer Referral Code: ${customer.referral_code} (Referrals: ${customer.referral_count || 0})`,
+    customer.referred_by
+      ? `🤝 Referred By: ${customer.referred_by}${
+          referralBonusCredited && referrer
+            ? ` (Credited +${bonusAdded || 0} Stars to ${referrer.telegram_user_id})`
+            : ''
+        }`
+      : null,
+    `🕒 Confirmed At: ${new Date().toISOString()}`,
+  ].filter(Boolean);
+  return sendAdminGroupNotification({
+    eventType: 'PAYMENT_VERIFIED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
+async function notifyAdminWithdrawalRequested({ customer, request }) {
+  const dedupKey = `withdrawal_req_${request.id}`;
+  const lines = [
+    '🏦 NEW WITHDRAWAL REQUEST — DiwaliBigdeal',
+    '',
+    `🆔 Request ID: ${request.id}`,
+    `👤 User ID: ${customer.telegram_user_id} (${customer.name || 'Customer'})`,
+    `🔗 Referral Code: ${request.referral_code}`,
+    `💰 Requested Amount: ${request.amount} Stars`,
+    `📌 Status: ${request.status}`,
+    `🕒 Requested At: ${request.created_at}`,
+  ];
+  return sendAdminGroupNotification({
+    eventType: 'WITHDRAWAL_REQUESTED',
+    dedupKey,
+    text: lines.join('\n'),
+  });
+}
+
 function timingSafeCompareStrings(aStr, bStr) {
   try {
     const a = Buffer.from(String(aStr));
@@ -449,10 +1137,6 @@ function timingSafeCompareStrings(aStr, bStr) {
   }
 }
 
-/**
- * Validates Telegram's `X-Telegram-Bot-Api-Secret-Token` header against both the
- * raw trimmed `TELEGRAM_WEBHOOK_SECRET` and the sanitized `[A-Za-z0-9_-]` form.
- */
 function verifyTelegramWebhookSecret(headerToken) {
   const rawSecret = getConfig().TELEGRAM_WEBHOOK_SECRET;
   const sanitizedSecret = sanitizeSecretToken(rawSecret);
@@ -474,9 +1158,6 @@ function verifyTelegramWebhookSecret(headerToken) {
   return { valid: false, reason: 'value_mismatch' };
 }
 
-/**
- * Fetches live Telegram `getWebhookInfo` and `getMe` safely without exposing any token or secret.
- */
 async function getSafeTelegramWebhookDiagnostics() {
   const cfg = getConfig();
   const token = cfg.TELEGRAM_BOT_TOKEN;
@@ -484,12 +1165,14 @@ async function getSafeTelegramWebhookDiagnostics() {
   const secretConfigured = Boolean(
     cfg.TELEGRAM_WEBHOOK_SECRET && cfg.TELEGRAM_WEBHOOK_SECRET !== 'YOUR_TELEGRAM_WEBHOOK_SECRET'
   );
+  const adminGroupCheck = validateAdminGroupChatId();
 
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
     return {
       ok: false,
       telegram_bot_token_configured: false,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       expected_webhook_url: expectedUrl,
       webhook_registered: false,
       url_matches_production: false,
@@ -516,6 +1199,7 @@ async function getSafeTelegramWebhookDiagnostics() {
       ok: Boolean(whData && whData.ok),
       telegram_bot_token_configured: true,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       bot: botInfo
         ? {
             id: botInfo.id,
@@ -542,6 +1226,7 @@ async function getSafeTelegramWebhookDiagnostics() {
       ok: false,
       telegram_bot_token_configured: true,
       telegram_webhook_secret_configured: secretConfigured,
+      telegram_admin_chat_configured: adminGroupCheck.valid,
       expected_webhook_url: expectedUrl,
       webhook_registered: false,
       url_matches_production: false,
@@ -551,11 +1236,6 @@ async function getSafeTelegramWebhookDiagnostics() {
   }
 }
 
-/**
- * Registers the production webhook URL (`https://100197-oqqb.vercel.app/api/telegram/webhook`),
- * allowed_updates (`message`, `callback_query`, `pre_checkout_query`), and bot commands with Telegram.
- * Never returns or logs the token or secret.
- */
 async function ensureTelegramWebhookRegistered(forceSync = false) {
   const cfg = getConfig();
   const token = cfg.TELEGRAM_BOT_TOKEN;
@@ -607,7 +1287,6 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
     });
     const setJson = await setRes.json();
 
-    // Also register standard bot commands menu in Telegram
     await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -617,6 +1296,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
           { command: 'enter', description: 'अभी जुड़ें | Join Entry (₹199)' },
           { command: 'prizes', description: 'इनाम देखें | View Prizes' },
           { command: 'ticket', description: 'मेरा टिकट देखें | View My Ticket' },
+          { command: 'refer', description: '🎁 Refer & Earn Dashboard' },
           { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
           { command: 'support', description: 'सहायता | Customer Support' },
         ],
@@ -709,12 +1389,6 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
   return outgoingRecord;
 }
 
-/**
- * Creates a Telegram Stars invoice link with:
- * - currency: "XTR"
- * - provider_token: ""
- * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
- */
 async function createTelegramStarsInvoiceLink(paymentId) {
   const token = getConfig().TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
@@ -754,13 +1428,6 @@ async function createTelegramStarsInvoiceLink(paymentId) {
   return null;
 }
 
-/**
- * Sends a native Telegram Stars invoice with:
- * - currency: "XTR"
- * - provider_token: ""
- * - prices: [{"label":"DiwaliBigdeal Entry","amount":100}]
- * - No Cancel button
- */
 async function sendTelegramStarsInvoice(chatId, paymentId) {
   const cid = String(chatId);
   const token = getConfig().TELEGRAM_BOT_TOKEN;
@@ -985,6 +1652,11 @@ async function processVerifiedPaymentWebhook({
     telegramPaymentChargeId
   );
 
+  const referralCredit = db.creditVerifiedReferralOnPayment(
+    issuance.customer.telegram_user_id,
+    paymentId
+  );
+
   if (!issuance.alreadyIssued) {
     const successMessage = [
       '🎉 बधाई हो! आपका Payment सफल रहा!',
@@ -1011,8 +1683,19 @@ async function processVerifiedPaymentWebhook({
       MAIN_MENU_INLINE_KEYBOARD
     );
 
+    await notifyAdminVerifiedPayment({
+      customer: issuance.customer,
+      ticketNumber: issuance.ticketNumber,
+      paymentId,
+      chargeId: telegramPaymentChargeId,
+      referralBonusCredited: referralCredit.credited,
+      referrer: referralCredit.referrer,
+      bonusAdded: referralCredit.bonusAdded,
+    });
+
     logger.info('PaymentVerification', `Sent Telegram confirmation for ticket ${issuance.ticketNumber}`, {
       payment_id: paymentId,
+      referral_credited: referralCredit.credited,
     });
   }
 
@@ -1028,6 +1711,24 @@ async function processVerifiedPaymentWebhook({
 // ============================================================================
 // 6. CONVERSATION STATE MACHINE & BOT FLOW
 // ============================================================================
+function extractReferralCodeFromText(rawText) {
+  const trimmed = String(rawText || '').trim();
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2) {
+    const cmd = parts[0].split('@')[0].toLowerCase();
+    if (cmd === '/start' || cmd === '/join' || cmd === '/enter') {
+      const arg = parts[1].trim();
+      if (/^(ref_|ref-)?[A-Z0-9]{4,12}$/i.test(arg)) {
+        return normalizeReferralCode(arg);
+      }
+    }
+  }
+  if (/^(ref_|ref-)[A-Z0-9]{4,12}$/i.test(trimmed)) {
+    return normalizeReferralCode(trimmed);
+  }
+  return null;
+}
+
 function validateIndianMobileNumber(input) {
   const cleaned = String(input || '').replace(/[\s\-()]/g, '');
   const match = cleaned.match(/^(?:\+?91|0)?([6-9]\d{9})$/);
@@ -1037,10 +1738,6 @@ function validateIndianMobileNumber(input) {
   return { valid: true, normalized: match[1] };
 }
 
-/**
- * Normalizes Telegram slash commands by stripping @BotUsername suffixes and lowercasing.
- * e.g. "/start@DiwaliDhamaka2026Bot" -> "/start"
- */
 function normalizeBotCommand(rawText) {
   const trimmed = String(rawText || '').trim();
   if (!trimmed.startsWith('/')) {
@@ -1133,7 +1830,7 @@ const BOT_MESSAGES = {
       '✅ Payment सफल होते ही आपका Unique Ticket Number तुरंत जारी कर दिया जाएगा।',
     ].join('\n'),
 
-  myTicketConfirmed: (ticketNumber, name, phone) =>
+  myTicketConfirmed: (ticketNumber, name, phone, referralCode, referralCount) =>
     [
       '🎫 मेरा टिकट | MY CONFIRMED TICKET',
       '',
@@ -1141,13 +1838,16 @@ const BOT_MESSAGES = {
       '',
       `👤 नाम (Name): ${name}`,
       `📱 मोबाइल (Mobile): ${phone}`,
+      referralCode ? `🔗 Referral Code: ${referralCode} (Referrals: ${referralCount ?? 0})` : null,
       '',
       '🎟️ Entry Fee: ₹199',
       '✅ Status: CONFIRMED (पक्का)',
       '',
       '📅 Winner Announcement: 8 November 2026',
       '⏰ Time: रात 11:59 बजे (IST)',
-    ].join('\n'),
+    ]
+      .filter((line) => line !== null)
+      .join('\n'),
 
   myTicketNotFound: () =>
     [
@@ -1215,7 +1915,88 @@ const BOT_MESSAGES = {
       '',
       '📧 Support Email: diwalideal2026@gmail.com',
     ].join('\n'),
+
+  referralDashboard: (data) => {
+    const pendingWithdrawals = (data.withdrawal_requests || []).filter(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+    const withdrawalLines =
+      !data.withdrawal_requests || data.withdrawal_requests.length === 0
+        ? ['• कोई Pending या पिछला Withdrawal Request नहीं है (None)']
+        : data.withdrawal_requests.slice(0, 5).map((w) => {
+            const refStr = w.payout_reference ? ` [Ref: ${w.payout_reference}]` : '';
+            return `• ${w.id}: ${w.amount} Stars — Status: ${w.status}${refStr}`;
+          });
+
+    const historyLines =
+      !data.history || data.history.length === 0
+        ? ['• अभी तक कोई Referred User नहीं है (0 Referrals recorded in DB)']
+        : data.history.slice(0, 10).map((item, idx) => {
+            const dateStr = String(item.referred_at || '').slice(0, 10);
+            const regStr = item.registration_completed ? 'Complete' : 'Incomplete';
+            return `${idx + 1}. ${item.masked_identifier} | Date: ${dateStr} | Reg: ${regStr} | Payment: ${item.payment_status_label} | Bonus: ${item.bonus_status_label}`;
+          });
+
+    const programStatusLine = data.referral_program_enabled
+      ? `✅ Referral Bonus Active (Min Withdrawal: ${data.min_withdrawal_amount} Stars)`
+      : 'ℹ️ Referral Tracking Active (Bonus & Withdrawals disabled until campaign policy activation)';
+
+    return [
+      '🎁 DIWALI BIGDEAL — REFER & EARN DASHBOARD',
+      '',
+      `🔑 Permanent Referral Code: ${data.referral_code}`,
+      `🔗 Personal Referral Link:\n${data.referral_link}`,
+      '📋 (ऊपर दिए गए Link को Tap करके Copy या Share करें)',
+      '',
+      '📊 LIVE REFERRAL STATS (Database Records):',
+      `• Total Referred Users: ${data.total_referred_users}`,
+      `• Successfully Registered Referred Users: ${data.registered_referred_users}`,
+      `• Successfully Verified Referred Payments: ${data.verified_referred_payments}`,
+      `• Pending Payments: ${data.pending_referred_payments}`,
+      `• Total Verified Referral Bonus: ${data.total_verified_bonus} Stars`,
+      `• Available Withdrawal Balance: ${data.available_withdrawal_balance} Stars`,
+      `• Pending Withdrawal Requests: ${pendingWithdrawals.length}`,
+      `• Program Status: ${programStatusLine}`,
+      '',
+      '🏦 WITHDRAWAL REQUESTS & STATUS:',
+      ...withdrawalLines,
+      '',
+      '📜 REFERRAL HISTORY (Privacy-Masked):',
+      ...historyLines,
+    ].join('\n');
+  },
 };
+
+function buildReferralDashboardKeyboard(data) {
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(
+    data.referral_link
+  )}&text=${encodeURIComponent(
+    '🪔 DiwaliBigdeal से जुड़ें और Mahindra Thar ROXX, Refrigerator, Smart LED TV व Cash Prizes जीतने का मौका पाएँ!'
+  )}`;
+
+  const rows = [
+    [
+      { text: '📤 Share Referral Link', url: shareUrl },
+      { text: '📋 Copy Link / Code', callback_data: 'action_copy_referral_link' },
+    ],
+  ];
+
+  if (data.can_request_withdrawal) {
+    rows.push([
+      {
+        text: `💸 Request Withdrawal (${data.available_withdrawal_balance} Stars)`,
+        callback_data: 'action_request_withdrawal',
+      },
+    ]);
+  }
+
+  rows.push([
+    { text: '🔄 Refresh Stats', callback_data: 'menu_refer_earn' },
+    { text: '🏠 Main Menu', callback_data: 'action_back_main_menu' },
+  ]);
+
+  return { inline_keyboard: rows };
+}
 
 async function sendConfirmationScreen(customer) {
   const text = BOT_MESSAGES.confirmDetails(
@@ -1274,7 +2055,9 @@ async function handleMyTicketTrigger(customer) {
       BOT_MESSAGES.myTicketConfirmed(
         customer.ticket_number,
         customer.name || 'Customer',
-        customer.phone || ''
+        customer.phone || '',
+        customer.referral_code,
+        customer.referral_count
       ),
       MAIN_MENU_INLINE_KEYBOARD
     );
@@ -1309,6 +2092,13 @@ async function handleSupportTrigger(customer) {
     BOT_MESSAGES.supportMessage(),
     MAIN_MENU_INLINE_KEYBOARD
   );
+}
+
+async function handleReferAndEarnTrigger(customer) {
+  const dashboardData = db.getCustomerReferralDashboard(customer.telegram_user_id);
+  const text = BOT_MESSAGES.referralDashboard(dashboardData);
+  const keyboard = buildReferralDashboardKeyboard(dashboardData);
+  await sendTelegramMessage(customer.telegram_chat_id, text, keyboard);
 }
 
 async function handleTelegramUpdate(update) {
@@ -1360,9 +2150,10 @@ async function handleTelegramUpdate(update) {
     const sp = msg.successful_payment;
     const userId = String((msg.from && msg.from.id) || msg.chat.id);
     const chatId = String(msg.chat.id);
+    const username = (msg.from && msg.from.username) || null;
     const paymentId = sp.invoice_payload;
 
-    db.getOrCreateCustomer(userId, chatId);
+    db.getOrCreateCustomer(userId, chatId, username);
 
     if (sp.currency !== 'XTR' || Number(sp.total_amount) !== 100) {
       logger.security(
@@ -1402,6 +2193,10 @@ async function handleTelegramUpdate(update) {
       action_edit_details: '✏️ जानकारी बदलें | Edit Details',
       menu_my_ticket: '🎫 मेरा टिकट | My Ticket',
       menu_prize_details: '🎁 इनाम देखें | View Prizes',
+      menu_refer_earn: '🎁 Refer & Earn',
+      action_copy_referral_link: '📋 Copy Link / Code',
+      action_request_withdrawal: '💸 Request Withdrawal',
+      action_back_main_menu: '🏠 Main Menu',
       menu_terms: '📜 नियम और शर्तें | Terms & Conditions',
       menu_support: '📞 सहायता | Support',
     };
@@ -1420,7 +2215,7 @@ async function handleTelegramUpdate(update) {
 
     await answerTelegramCallbackQuery(cb.id);
 
-    let customer = db.getOrCreateCustomer(userId, chatId);
+    let customer = db.getOrCreateCustomer(userId, chatId, (cb.from && cb.from.username) || null);
 
     if (data === 'menu_join_199') {
       await handleJoinEntryTrigger(customer);
@@ -1463,6 +2258,68 @@ async function handleTelegramUpdate(update) {
       return customer;
     }
 
+    if (data === 'menu_refer_earn') {
+      await handleReferAndEarnTrigger(customer);
+      return customer;
+    }
+
+    if (data === 'action_copy_referral_link') {
+      const dash = db.getCustomerReferralDashboard(userId);
+      await sendTelegramMessage(
+        chatId,
+        [
+          '📋 आपका Permanent Referral Code और Link:',
+          '',
+          `🔑 Referral Code: ${dash.referral_code}`,
+          `🔗 Referral Link:\n${dash.referral_link}`,
+          '',
+          'इस संदेश को Copy या Forward करके अपने दोस्तों के साथ साझा करें!',
+        ].join('\n'),
+        buildReferralDashboardKeyboard(dash)
+      );
+      return customer;
+    }
+
+    if (data === 'action_request_withdrawal') {
+      const reqResult = db.createWithdrawalRequest(userId);
+      const updatedDash = db.getCustomerReferralDashboard(userId);
+      if (reqResult.ok && reqResult.request) {
+        await notifyAdminWithdrawalRequested({
+          customer,
+          request: reqResult.request,
+        });
+        await sendTelegramMessage(
+          chatId,
+          [
+            '✅ आपका Withdrawal Request सफलतापूर्वक दर्ज कर लिया गया है!',
+            '',
+            `🆔 Request ID: ${reqResult.request.id}`,
+            `💰 Amount: ${reqResult.request.amount} Stars`,
+            `📌 Status: ${reqResult.request.status} (Awaiting Admin Review)`,
+            '',
+            '⚠️ ध्यान दें: प्रत्येक Withdrawal Request की Admin द्वारा जाँच की जाती है।',
+          ].join('\n'),
+          buildReferralDashboardKeyboard(updatedDash)
+        );
+      } else {
+        await sendTelegramMessage(
+          chatId,
+          `⚠️ Withdrawal Request उपलब्ध नहीं है: ${reqResult.reason || 'Not eligible'}`,
+          buildReferralDashboardKeyboard(updatedDash)
+        );
+      }
+      return customer;
+    }
+
+    if (data === 'action_back_main_menu') {
+      await sendTelegramMessage(
+        chatId,
+        BOT_MESSAGES.mainMenuGreeting(),
+        MAIN_MENU_INLINE_KEYBOARD
+      );
+      return customer;
+    }
+
     if (data === 'menu_terms') {
       await handleTermsTrigger(customer);
       return customer;
@@ -1476,11 +2333,12 @@ async function handleTelegramUpdate(update) {
     return customer;
   }
 
-  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /terms, /enter, /support)
+  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support)
   const incomingMsg = update.message || update.edited_message;
   if (incomingMsg && typeof incomingMsg.text === 'string') {
     const userId = String((incomingMsg.from && incomingMsg.from.id) || incomingMsg.chat.id);
     const chatId = String(incomingMsg.chat.id);
+    const username = (incomingMsg.from && incomingMsg.from.username) || null;
     const text = incomingMsg.text.trim();
     const command = normalizeBotCommand(text);
 
@@ -1492,7 +2350,14 @@ async function handleTelegramUpdate(update) {
       direction: 'user',
     });
 
-    let customer = db.getOrCreateCustomer(userId, chatId);
+    let customer = db.getOrCreateCustomer(userId, chatId, username);
+
+    const referralCodeCandidate = extractReferralCodeFromText(text);
+    let referralResult = { applied: false, referrer: null };
+    if (referralCodeCandidate) {
+      referralResult = db.applyReferralCodeOnce(userId, referralCodeCandidate);
+      customer = db.getCustomerByUserId(userId) || customer;
+    }
 
     // Command: /start, /menu, /help, hi, hello
     if (
@@ -1503,6 +2368,14 @@ async function handleTelegramUpdate(update) {
       text.toLowerCase() === 'hi' ||
       text.toLowerCase() === 'hello'
     ) {
+      if (command === '/start') {
+        await notifyAdminNewBotStart({
+          customer,
+          username,
+          referralApplied: referralResult.applied,
+          referrer: referralResult.referrer,
+        });
+      }
       await sendTelegramMessage(
         chatId,
         BOT_MESSAGES.mainMenuGreeting(),
@@ -1543,6 +2416,16 @@ async function handleTelegramUpdate(update) {
       text === '🏆 Prize Details'
     ) {
       await handlePrizeDetailsTrigger(customer);
+      return customer;
+    }
+
+    // Command: /refer or 🎁 Refer & Earn button text
+    if (
+      command === '/refer' ||
+      command === '/referral' ||
+      text === '🎁 Refer & Earn'
+    ) {
+      await handleReferAndEarnTrigger(customer);
       return customer;
     }
 
@@ -1607,6 +2490,7 @@ async function handleTelegramUpdate(update) {
           address: text,
           conversation_state: ConversationState.WAITING_FOR_CONFIRMATION,
         });
+        await notifyAdminRegistrationSubmitted(customer);
         await sendConfirmationScreen(customer);
         return customer;
       }
@@ -1694,7 +2578,7 @@ module.exports = async function handler(req, res) {
         endpoint: '/api/telegram/webhook',
         status: 'READY',
         supported_methods: ['POST', 'GET'],
-        supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/terms', '/support'],
+        supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/refer', '/terms', '/support'],
         supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
         payment_mode: 'telegram_stars (XTR)',
         currency: 'XTR',
@@ -1703,6 +2587,7 @@ module.exports = async function handler(req, res) {
         invoice_prices: [{ label: 'DiwaliBigdeal Entry', amount: 100 }],
         telegram_bot_token_configured: status.telegramBotTokenConfigured,
         telegram_webhook_secret_configured: status.telegramWebhookSecretConfigured,
+        telegram_admin_chat_configured: status.telegramAdminChatConfigured,
         webhook_registration: webhookDiagnostics,
         webhook_auto_synced: Boolean(syncResult && syncResult.synced),
         instructions:
@@ -1734,7 +2619,6 @@ module.exports = async function handler(req, res) {
           'Rejected unauthorized Telegram webhook request (secret token mismatch)',
           { reason: check.reason }
         );
-        // Automatically re-register webhook with Telegram so secret_token stays synchronized
         await ensureTelegramWebhookRegistered(true).catch(() => {});
         return sendJson(res, 401, {
           ok: false,

@@ -6,14 +6,30 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { ConversationState, CustomerRecord, OutgoingBotMessage, PaymentStatus } from './types';
+import {
+  ConversationState,
+  CustomerRecord,
+  CustomerReferralDashboardData,
+  OutgoingBotMessage,
+  PaymentStatus,
+  ReferralHistoryItem,
+  WithdrawalRequest,
+  WithdrawalStatus,
+} from './types';
 import { CONFIG } from './config';
 import { logger } from './logger';
 
 export interface AdminNotificationEntry {
   id: string;
   dedup_key: string;
-  event_type: 'BOT_START' | 'REGISTRATION_SUBMITTED' | 'PAYMENT_VERIFIED' | 'ADMIN_TEST';
+  event_type:
+    | 'BOT_START'
+    | 'REGISTRATION_SUBMITTED'
+    | 'PAYMENT_VERIFIED'
+    | 'REFERRAL_BONUS_CREDITED'
+    | 'WITHDRAWAL_REQUESTED'
+    | 'WITHDRAWAL_STATUS_CHANGED'
+    | 'ADMIN_TEST';
   text: string;
   delivered_to_telegram: boolean;
   telegram_status: string;
@@ -26,6 +42,8 @@ interface DatabaseStorageSnapshot {
   processedWebhooks: Record<string, string>; // payment_id -> ticket_number
   processedAdminNotifications: Record<string, string>; // dedup_key -> ISO timestamp
   processedReferrals: Record<string, string>; // referred_user_id -> referrer_code
+  processedReferralBonuses: Record<string, string>; // payment_id -> referrer_user_id
+  withdrawalRequests: Record<string, WithdrawalRequest>; // withdrawal_id -> WithdrawalRequest
   adminNotifications: AdminNotificationEntry[];
   chatHistories: Record<string, OutgoingBotMessage[]>;
 }
@@ -36,6 +54,11 @@ const DATA_DIR =
     : path.resolve(process.cwd(), 'data');
 const JSON_DB_FILE = path.join(DATA_DIR, 'diwalibigdeal_store.json');
 
+/**
+ * Generates a permanent, deterministic 6-character alphanumeric referral code
+ * for a Telegram user ID (never changes on repeated visits).
+ * Link format: https://t.me/DiwaliDhamaka2026Bot?start=ref_CODE
+ */
 export function generateReferralCode(telegramUserId: string): string {
   const hash = crypto
     .createHash('sha256')
@@ -43,7 +66,41 @@ export function generateReferralCode(telegramUserId: string): string {
     .digest('hex')
     .slice(0, 6)
     .toUpperCase();
-  return `REF-${hash}`;
+  return hash;
+}
+
+/**
+ * Normalizes any raw referral code input (`ref_ABC123`, `REF-ABC123`, `ABC123`)
+ * to the canonical 6-character uppercase code `ABC123`.
+ */
+export function normalizeReferralCode(raw?: string | null): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/^(ref_|ref-)/i, '')
+    .toUpperCase();
+  return cleaned;
+}
+
+export function formatReferralLink(referralCode: string): string {
+  const code = normalizeReferralCode(referralCode);
+  return `https://t.me/${CONFIG.TELEGRAM_BOT_USERNAME}?start=ref_${code}`;
+}
+
+export function maskCustomerIdentifier(customer: CustomerRecord): string {
+  if (customer.name && customer.name.trim().length >= 2) {
+    const parts = customer.name.trim().split(/\s+/);
+    const first = parts[0];
+    const maskedFirst =
+      first.length <= 2 ? `${first[0]}*` : `${first.slice(0, 2)}${'*'.repeat(Math.min(4, first.length - 2))}`;
+    const lastInitial = parts.length > 1 ? ` ${parts[parts.length - 1][0]}.` : '';
+    return `${maskedFirst}${lastInitial} (ID: ***${String(customer.telegram_user_id).slice(-4)})`;
+  }
+  if (customer.username) {
+    const clean = customer.username.replace(/^@/, '');
+    const prefix = clean.slice(0, 2);
+    return `@${prefix}*** (ID: ***${String(customer.telegram_user_id).slice(-4)})`;
+  }
+  return `User ***${String(customer.telegram_user_id).slice(-4)}`;
 }
 
 class DatabaseManager {
@@ -53,6 +110,8 @@ class DatabaseManager {
     processedWebhooks: {},
     processedAdminNotifications: {},
     processedReferrals: {},
+    processedReferralBonuses: {},
+    withdrawalRequests: {},
     adminNotifications: [],
     chatHistories: {},
   };
@@ -75,22 +134,29 @@ class DatabaseManager {
           processedWebhooks: parsed.processedWebhooks || {},
           processedAdminNotifications: parsed.processedAdminNotifications || {},
           processedReferrals: parsed.processedReferrals || {},
+          processedReferralBonuses: parsed.processedReferralBonuses || {},
+          withdrawalRequests: parsed.withdrawalRequests || {},
           adminNotifications: Array.isArray(parsed.adminNotifications)
             ? parsed.adminNotifications
             : [],
           chatHistories: parsed.chatHistories || {},
         };
-        // Ensure existing customer records have referral_code populated
         for (const uid of Object.keys(this.store.customers)) {
           const c = this.store.customers[uid];
-          if (!c.referral_code) {
-            c.referral_code = generateReferralCode(uid);
+          c.referral_code = normalizeReferralCode(c.referral_code) || generateReferralCode(uid);
+          if (c.referred_by) {
+            c.referred_by = normalizeReferralCode(c.referred_by);
+          } else {
+            c.referred_by = null;
           }
           if (typeof c.referral_count !== 'number') {
             c.referral_count = 0;
           }
-          if (c.referred_by === undefined) {
-            c.referred_by = null;
+          if (typeof c.verified_referral_count !== 'number') {
+            c.verified_referral_count = 0;
+          }
+          if (typeof c.verified_referral_bonus !== 'number') {
+            c.verified_referral_bonus = 0;
           }
         }
         logger.info('Database', 'Loaded persistent database snapshot from disk', {
@@ -113,6 +179,9 @@ class DatabaseManager {
     const now = new Date(Date.now() - 3600 * 1000 * 5).toISOString();
     const recent = new Date(Date.now() - 1800 * 1000).toISOString();
 
+    const demo1Code = generateReferralCode('918820144');
+    const demo2Code = generateReferralCode('917451902');
+
     const demo1: CustomerRecord = {
       telegram_user_id: '918820144',
       telegram_chat_id: '918820144',
@@ -125,9 +194,13 @@ class DatabaseManager {
       payment_status: PaymentStatus.PAID,
       payment_amount: CONFIG.CAMPAIGN_ENTRY_FEE,
       ticket_number: 'DB2026-000001',
-      referral_code: generateReferralCode('918820144'),
+      referral_code: demo1Code,
       referred_by: null,
+      referred_by_user_id: null,
+      referred_at: null,
       referral_count: 1,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: now,
       updated_at: recent,
     };
@@ -144,9 +217,13 @@ class DatabaseManager {
       payment_status: PaymentStatus.PENDING,
       payment_amount: CONFIG.CAMPAIGN_ENTRY_FEE,
       ticket_number: null,
-      referral_code: generateReferralCode('917451902'),
+      referral_code: demo2Code,
       referred_by: demo1.referral_code,
+      referred_by_user_id: demo1.telegram_user_id,
+      referred_at: recent,
       referral_count: 0,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: recent,
       updated_at: recent,
     };
@@ -189,8 +266,9 @@ class DatabaseManager {
         existing.username = username;
         changed = true;
       }
-      if (!existing.referral_code) {
-        existing.referral_code = generateReferralCode(uid);
+      const canonicalCode = normalizeReferralCode(existing.referral_code) || generateReferralCode(uid);
+      if (existing.referral_code !== canonicalCode) {
+        existing.referral_code = canonicalCode;
         changed = true;
       }
       if (changed) {
@@ -215,7 +293,11 @@ class DatabaseManager {
       ticket_number: null,
       referral_code: generateReferralCode(uid),
       referred_by: null,
+      referred_by_user_id: null,
+      referred_at: null,
       referral_count: 0,
+      verified_referral_count: 0,
+      verified_referral_bonus: 0,
       created_at: now,
       updated_at: now,
     };
@@ -232,11 +314,11 @@ class DatabaseManager {
   }
 
   public getCustomerByReferralCode(referralCode: string): CustomerRecord | null {
-    const clean = String(referralCode || '').trim().toUpperCase();
+    const clean = normalizeReferralCode(referralCode);
     if (!clean) return null;
     for (const key of Object.keys(this.store.customers)) {
       const cust = this.store.customers[key];
-      if (cust.referral_code && cust.referral_code.toUpperCase() === clean) {
+      if (cust.referral_code && normalizeReferralCode(cust.referral_code) === clean) {
         return { ...cust };
       }
     }
@@ -244,15 +326,15 @@ class DatabaseManager {
   }
 
   /**
-   * Atomically applies a referral code to a user once and prevents self-referrals
-   * and duplicate referral counts.
+   * Atomically attributes a referred user to a referrer's permanent code once.
+   * Prevents self-referrals, duplicate attribution, and overwriting an existing referrer.
    */
   public applyReferralCodeOnce(
     referredUserId: string,
     rawReferralCode?: string | null
   ): { applied: boolean; referrer: CustomerRecord | null; reason?: string } {
     const uid = String(referredUserId);
-    const code = String(rawReferralCode || '').trim().toUpperCase();
+    const code = normalizeReferralCode(rawReferralCode);
     if (!code) {
       return { applied: false, referrer: null, reason: 'empty_code' };
     }
@@ -281,6 +363,8 @@ class DatabaseManager {
 
     const now = new Date().toISOString();
     referredCustomer.referred_by = referrer.referral_code;
+    referredCustomer.referred_by_user_id = referrer.telegram_user_id;
+    referredCustomer.referred_at = now;
     referredCustomer.updated_at = now;
 
     const referrerRecord = this.store.customers[referrer.telegram_user_id];
@@ -291,6 +375,273 @@ class DatabaseManager {
     this.persist();
 
     return { applied: true, referrer: { ...referrerRecord } };
+  }
+
+  /**
+   * Credits verified referral bonus to the referrer strictly once per verified payment_id,
+   * and only if REFERRAL_PROGRAM_ENABLED is true (or tracks verified count accurately).
+   */
+  public creditVerifiedReferralOnPayment(
+    referredUserId: string,
+    paymentId: string
+  ): {
+    credited: boolean;
+    referrer: CustomerRecord | null;
+    bonusAdded: number;
+  } {
+    const uid = String(referredUserId);
+    const pid = String(paymentId || '').trim();
+    if (!pid) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    if (this.store.processedReferralBonuses[pid]) {
+      const existingRefId = this.store.processedReferralBonuses[pid];
+      return {
+        credited: false,
+        referrer: this.getCustomerByUserId(existingRefId),
+        bonusAdded: 0,
+      };
+    }
+
+    const referredCustomer = this.store.customers[uid];
+    if (!referredCustomer || !referredCustomer.referred_by) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const referrer = this.getCustomerByReferralCode(referredCustomer.referred_by);
+    if (!referrer || referrer.telegram_user_id === uid) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const referrerRecord = this.store.customers[referrer.telegram_user_id];
+    if (!referrerRecord) {
+      return { credited: false, referrer: null, bonusAdded: 0 };
+    }
+
+    const bonusPerVerified = CONFIG.REFERRAL_PROGRAM_ENABLED
+      ? CONFIG.REFERRAL_BONUS_PER_VERIFIED_PAYMENT
+      : 0;
+
+    referrerRecord.verified_referral_count = (referrerRecord.verified_referral_count || 0) + 1;
+    referrerRecord.verified_referral_bonus =
+      (referrerRecord.verified_referral_bonus || 0) + bonusPerVerified;
+    referrerRecord.updated_at = new Date().toISOString();
+
+    this.store.processedReferralBonuses[pid] = referrerRecord.telegram_user_id;
+    this.persist();
+
+    return {
+      credited: true,
+      referrer: { ...referrerRecord },
+      bonusAdded: bonusPerVerified,
+    };
+  }
+
+  /**
+   * Computes the complete live Referral & Withdrawal Dashboard for a customer
+   * strictly from persistent database records (never sample numbers).
+   */
+  public getCustomerReferralDashboard(telegramUserId: string): CustomerReferralDashboardData {
+    const uid = String(telegramUserId);
+    const customer = this.store.customers[uid];
+    const referralCode = customer
+      ? normalizeReferralCode(customer.referral_code) || generateReferralCode(uid)
+      : generateReferralCode(uid);
+    const referralLink = formatReferralLink(referralCode);
+
+    // Find all customers referred by this user's referral_code
+    const referredCustomers = Object.values(this.store.customers)
+      .filter(
+        (c) =>
+          c.telegram_user_id !== uid &&
+          c.referred_by &&
+          normalizeReferralCode(c.referred_by) === referralCode
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.referred_at || b.created_at).getTime() -
+          new Date(a.referred_at || a.created_at).getTime()
+      );
+
+    const totalReferredUsers = referredCustomers.length;
+    const registeredReferredUsers = referredCustomers.filter((c) =>
+      Boolean(c.name && c.phone && c.address)
+    ).length;
+    const verifiedReferredPayments = referredCustomers.filter(
+      (c) => c.payment_status === PaymentStatus.PAID && Boolean(c.ticket_number)
+    ).length;
+    const pendingReferredPayments = referredCustomers.filter(
+      (c) => c.payment_status !== PaymentStatus.PAID || !c.ticket_number
+    ).length;
+
+    const bonusPerVerified = CONFIG.REFERRAL_PROGRAM_ENABLED
+      ? CONFIG.REFERRAL_BONUS_PER_VERIFIED_PAYMENT
+      : 0;
+    const totalVerifiedBonus = verifiedReferredPayments * bonusPerVerified;
+
+    // Sync customer's summary counters if needed
+    if (customer) {
+      customer.referral_count = totalReferredUsers;
+      customer.verified_referral_count = verifiedReferredPayments;
+      customer.verified_referral_bonus = totalVerifiedBonus;
+    }
+
+    const userWithdrawals = Object.values(this.store.withdrawalRequests)
+      .filter((w) => w.telegram_user_id === uid)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    // Locked or paid withdrawals: PENDING_APPROVAL, APPROVED_PENDING_PAYOUT, or PAID (REJECTED does not deduct balance)
+    const lockedOrPaidWithdrawalAmount = userWithdrawals
+      .filter((w) => w.status !== 'REJECTED')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    const availableWithdrawalBalance = Math.max(
+      0,
+      totalVerifiedBonus - lockedOrPaidWithdrawalAmount
+    );
+
+    const hasActivePendingWithdrawal = userWithdrawals.some(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+
+    const canRequestWithdrawal =
+      CONFIG.REFERRAL_PROGRAM_ENABLED &&
+      CONFIG.REFERRAL_WITHDRAWALS_ENABLED &&
+      availableWithdrawalBalance >= CONFIG.REFERRAL_MIN_WITHDRAWAL_AMOUNT &&
+      !hasActivePendingWithdrawal;
+
+    const PaidWithdrawalsTotal = userWithdrawals
+      .filter((w) => w.status === 'PAID')
+      .reduce((sum, w) => sum + Number(w.amount || 0), 0);
+
+    let remainingPaidPool = PaidWithdrawalsTotal;
+
+    const history: ReferralHistoryItem[] = referredCustomers.map((rc) => {
+      const regDone = Boolean(rc.name && rc.phone && rc.address);
+      const isVerifiedPaid =
+        rc.payment_status === PaymentStatus.PAID && Boolean(rc.ticket_number);
+      const paymentStatusLabel: 'Pending' | 'Verified' | 'Failed' = isVerifiedPaid
+        ? 'Verified'
+        : rc.payment_status === PaymentStatus.FAILED
+        ? 'Failed'
+        : 'Pending';
+
+      let bonusStatusLabel: 'Pending' | 'Eligible' | 'Paid' = 'Pending';
+      if (isVerifiedPaid && CONFIG.REFERRAL_PROGRAM_ENABLED) {
+        if (remainingPaidPool >= bonusPerVerified && bonusPerVerified > 0) {
+          bonusStatusLabel = 'Paid';
+          remainingPaidPool -= bonusPerVerified;
+        } else {
+          bonusStatusLabel = 'Eligible';
+        }
+      }
+
+      return {
+        masked_identifier: maskCustomerIdentifier(rc),
+        referred_at: rc.referred_at || rc.created_at,
+        registration_completed: regDone,
+        payment_status_label: paymentStatusLabel,
+        bonus_status_label: bonusStatusLabel,
+        bonus_amount: isVerifiedPaid ? bonusPerVerified : 0,
+      };
+    });
+
+    return {
+      referral_code: referralCode,
+      referral_link: referralLink,
+      referred_by: customer?.referred_by || null,
+      referral_program_enabled: CONFIG.REFERRAL_PROGRAM_ENABLED,
+      withdrawals_enabled: CONFIG.REFERRAL_WITHDRAWALS_ENABLED,
+      total_referred_users: totalReferredUsers,
+      registered_referred_users: registeredReferredUsers,
+      verified_referred_payments: verifiedReferredPayments,
+      pending_referred_payments: pendingReferredPayments,
+      total_verified_bonus: totalVerifiedBonus,
+      locked_or_paid_withdrawal_amount: lockedOrPaidWithdrawalAmount,
+      available_withdrawal_balance: availableWithdrawalBalance,
+      can_request_withdrawal: canRequestWithdrawal,
+      min_withdrawal_amount: CONFIG.REFERRAL_MIN_WITHDRAWAL_AMOUNT,
+      withdrawal_requests: userWithdrawals,
+      history,
+    };
+  }
+
+  /**
+   * Creates a withdrawal request with initial status PENDING_APPROVAL.
+   * Never marks a withdrawal as paid automatically.
+   */
+  public createWithdrawalRequest(telegramUserId: string): {
+    ok: boolean;
+    request?: WithdrawalRequest;
+    reason?: string;
+  } {
+    const uid = String(telegramUserId);
+    if (!CONFIG.REFERRAL_PROGRAM_ENABLED || !CONFIG.REFERRAL_WITHDRAWALS_ENABLED) {
+      return {
+        ok: false,
+        reason: 'Referral withdrawals are currently disabled by campaign configuration.',
+      };
+    }
+
+    const dashboard = this.getCustomerReferralDashboard(uid);
+    const activePending = dashboard.withdrawal_requests.find(
+      (w) => w.status === 'PENDING_APPROVAL' || w.status === 'APPROVED_PENDING_PAYOUT'
+    );
+    if (activePending) {
+      return {
+        ok: false,
+        request: activePending,
+        reason: `You already have an active withdrawal request (${activePending.id}) in status ${activePending.status}.`,
+      };
+    }
+
+    if (dashboard.available_withdrawal_balance < CONFIG.REFERRAL_MIN_WITHDRAWAL_AMOUNT) {
+      return {
+        ok: false,
+        reason: `Minimum eligible balance of ${CONFIG.REFERRAL_MIN_WITHDRAWAL_AMOUNT} Stars is required to request withdrawal (Available: ${dashboard.available_withdrawal_balance} Stars).`,
+      };
+    }
+
+    const now = new Date().toISOString();
+    const reqId = `WD-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const withdrawal: WithdrawalRequest = {
+      id: reqId,
+      telegram_user_id: uid,
+      referral_code: dashboard.referral_code,
+      amount: dashboard.available_withdrawal_balance,
+      status: 'PENDING_APPROVAL',
+      payout_reference: null,
+      created_at: now,
+      updated_at: now,
+    };
+
+    this.store.withdrawalRequests[reqId] = withdrawal;
+    this.persist();
+
+    return { ok: true, request: { ...withdrawal } };
+  }
+
+  public updateWithdrawalStatus(
+    withdrawalId: string,
+    status: WithdrawalStatus,
+    payoutReference?: string | null
+  ): WithdrawalRequest | null {
+    const existing = this.store.withdrawalRequests[String(withdrawalId)];
+    if (!existing) return null;
+    existing.status = status;
+    if (payoutReference !== undefined) {
+      existing.payout_reference = payoutReference;
+    }
+    existing.updated_at = new Date().toISOString();
+    this.persist();
+    return { ...existing };
+  }
+
+  public listAllWithdrawalRequests(): WithdrawalRequest[] {
+    return Object.values(this.store.withdrawalRequests).sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
   }
 
   public hasAdminNotificationBeenSent(dedupKey: string): boolean {
@@ -347,7 +698,11 @@ class DatabaseManager {
         | 'ticket_number'
         | 'referral_code'
         | 'referred_by'
+        | 'referred_by_user_id'
+        | 'referred_at'
         | 'referral_count'
+        | 'verified_referral_count'
+        | 'verified_referral_bonus'
       >
     >
   ): CustomerRecord {
@@ -421,6 +776,11 @@ class DatabaseManager {
     delete this.store.customers[uid];
     delete this.store.chatHistories[uid];
     delete this.store.processedReferrals[uid];
+    for (const wid of Object.keys(this.store.withdrawalRequests)) {
+      if (this.store.withdrawalRequests[wid].telegram_user_id === uid) {
+        delete this.store.withdrawalRequests[wid];
+      }
+    }
     for (const k of Object.keys(this.store.processedAdminNotifications)) {
       if (k.includes(uid)) {
         delete this.store.processedAdminNotifications[k];
@@ -445,7 +805,22 @@ CREATE TABLE IF NOT EXISTS customers (
   ticket_number VARCHAR(32) UNIQUE,
   referral_code VARCHAR(32) UNIQUE NOT NULL,
   referred_by VARCHAR(32),
+  referred_by_user_id VARCHAR(64),
+  referred_at TIMESTAMP WITH TIME ZONE,
   referral_count INTEGER NOT NULL DEFAULT 0,
+  verified_referral_count INTEGER NOT NULL DEFAULT 0,
+  verified_referral_bonus INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id VARCHAR(32) PRIMARY KEY,
+  telegram_user_id VARCHAR(64) NOT NULL REFERENCES customers(telegram_user_id),
+  referral_code VARCHAR(32) NOT NULL,
+  amount INTEGER NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'PENDING_APPROVAL',
+  payout_reference VARCHAR(128),
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -453,7 +828,8 @@ CREATE TABLE IF NOT EXISTS customers (
 CREATE INDEX IF NOT EXISTS idx_customers_payment_id ON customers(payment_id);
 CREATE INDEX IF NOT EXISTS idx_customers_ticket_number ON customers(ticket_number);
 CREATE INDEX IF NOT EXISTS idx_customers_referral_code ON customers(referral_code);
-CREATE INDEX IF NOT EXISTS idx_customers_state ON customers(conversation_state);`;
+CREATE INDEX IF NOT EXISTS idx_customers_referred_by ON customers(referred_by);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawal_requests(telegram_user_id);`;
   }
 }
 
