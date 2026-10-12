@@ -173,6 +173,7 @@ export interface TelegramPreCheckoutQuery {
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
+  sender_chat?: TelegramChat;
   chat: TelegramChat;
   date: number;
   text?: string;
@@ -189,6 +190,7 @@ export interface TelegramCallbackQuery {
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  edited_message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
   pre_checkout_query?: TelegramPreCheckoutQuery;
 }

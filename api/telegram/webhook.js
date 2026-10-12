@@ -1322,6 +1322,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
           { command: 'refer', description: '🎁 Refer & Earn Dashboard' },
           { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
           { command: 'support', description: 'सहायता | Customer Support' },
+          { command: 'test_group', description: 'Admin Group Chat ID Diagnostic' },
         ],
       }),
     }).catch(() => {});
@@ -1353,6 +1354,7 @@ async function ensureTelegramWebhookRegistered(forceSync = false) {
 async function sendTelegramMessage(chatId, text, replyMarkup) {
   const cid = String(chatId);
   const token = getConfig().TELEGRAM_BOT_TOKEN;
+  let delivered = false;
 
   const outgoingRecord = {
     id: crypto.randomUUID(),
@@ -1389,6 +1391,7 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
           description: errBody.slice(0, 200),
         });
       } else {
+        delivered = true;
         db.updateTelemetry({
           last_send_message_status: 'OK_200',
           last_send_message_at: new Date().toISOString(),
@@ -1407,8 +1410,11 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
         error: errMsg,
       });
     }
+  } else {
+    delivered = true;
   }
 
+  outgoingRecord.delivered = delivered;
   return outgoingRecord;
 }
 
@@ -1529,16 +1535,30 @@ async function answerTelegramCallbackQuery(callbackQueryId, text) {
   }
 }
 
-async function verifyTelegramGroupAdmin(chatId, userId) {
+async function verifyTelegramGroupAdmin(chatId, userId, senderChatId) {
   const cid = String(chatId);
-  const uid = String(userId);
+  const uid = userId !== undefined && userId !== null ? String(userId) : '';
+  const scid = senderChatId !== undefined && senderChatId !== null ? String(senderChatId) : '';
+
   if (!/^-\d+$/.test(cid)) {
     return false;
+  }
+
+  // Anonymous Group Admin: Telegram sets sender_chat.id === chat.id or from.id === 1087968824 (@GroupAnonymousBot)
+  if (scid && scid === cid) {
+    return true;
+  }
+  if (uid === '1087968824' || uid === cid) {
+    return true;
   }
 
   const token = getConfig().TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN' || cid.startsWith('sim_')) {
     return true;
+  }
+
+  if (!uid || !/^\d+$/.test(uid)) {
+    return false;
   }
 
   try {
@@ -1548,7 +1568,7 @@ async function verifyTelegramGroupAdmin(chatId, userId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: cid,
-        user_id: Number(uid) || uid,
+        user_id: Number(uid),
       }),
     });
     if (!response.ok) {
@@ -2389,56 +2409,87 @@ async function handleTelegramUpdate(update) {
     return customer;
   }
 
-  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support)
+  // 3. Handle Standard Text Messages & All Bot Commands (/start, /prizes, /ticket, /refer, /terms, /enter, /support, /test_group)
   const incomingMsg = update.message || update.edited_message;
   if (incomingMsg && typeof incomingMsg.text === 'string') {
     const chatType = (incomingMsg.chat && incomingMsg.chat.type) || 'private';
     const userId = String((incomingMsg.from && incomingMsg.from.id) || incomingMsg.chat.id);
+    const senderChatId =
+      incomingMsg.sender_chat && incomingMsg.sender_chat.id
+        ? String(incomingMsg.sender_chat.id)
+        : null;
     const chatId = String(incomingMsg.chat.id);
     const username = (incomingMsg.from && incomingMsg.from.username) || null;
     const text = incomingMsg.text.trim();
     const command = normalizeBotCommand(text);
+    const isTestGroupCmd =
+      command === '/test_group' || /^\/test_group(@[A-Za-z0-9_]+)?(\s|$)/i.test(text);
 
     // Group / Supergroup Isolation: ONLY process designated `/test_group` setup message from a group admin
     if (chatType === 'group' || chatType === 'supergroup' || chatId.startsWith('-')) {
-      if (command !== '/test_group') {
+      logger.info('AdminGroupDiagnostic', 'Group update inspected', {
+        updateReceived: true,
+        updateType: update.edited_message ? 'edited_message' : 'message',
+        testGroupDetected: isTestGroupCmd,
+      });
+
+      if (!isTestGroupCmd) {
         return null;
       }
 
-      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId);
+      const isAuthorizedAdmin = await verifyTelegramGroupAdmin(chatId, userId, senderChatId);
       if (!isAuthorizedAdmin) {
-        logger.security(
-          'AdminGroupSetup',
-          'Ignored /test_group command from non-administrator group member',
-          { chatType }
-        );
+        logger.security('AdminGroupDiagnostic', 'Rejected /test_group from non-admin sender', {
+          updateReceived: true,
+          updateType: update.edited_message ? 'edited_message' : 'message',
+          testGroupDetected: true,
+          replySent: false,
+        });
         return null;
       }
 
       const configuredAdminCheck = validateAdminGroupChatId();
       const matchesConfiguredEnv =
         configuredAdminCheck.valid && configuredAdminCheck.chatId === chatId;
-
-      logger.info('AdminGroupSetup', 'Processed authorized /test_group setup check', {
-        groupChatId: chatId,
-        chatType,
-        matchesConfiguredEnv,
-      });
+      const groupKindLabel =
+        chatType === 'supergroup' || chatId.startsWith('-100')
+          ? 'supergroup (Telegram Supergroup)'
+          : 'group (Regular Telegram Group)';
 
       const setupReply = [
-        '🔐 DIWALI BIGDEAL — ADMIN GROUP SETUP CHECK',
+        '🔐 DIWALI BIGDEAL — ADMIN GROUP DIAGNOSTIC (/test_group)',
         '',
-        '✅ Bot received /test_group in this private group via the existing webhook.',
-        `🆔 Detected Group Chat ID: ${chatId}`,
-        `📌 Chat Type: ${chatType}`,
-        `⚙️ Environment Status: ${
+        '✅ Group webhook delivery & administrator check verified.',
+        `🆔 Actual Numeric Chat ID: ${chatId}`,
+        `📌 Group Type: ${groupKindLabel}`,
+        `⚙️ TELEGRAM_ADMIN_CHAT_ID Status: ${
           matchesConfiguredEnv
-            ? 'MATCHED — TELEGRAM_ADMIN_CHAT_ID is already set to this group.'
-            : 'ACTION REQUIRED — Copy the negative Chat ID above into Vercel as TELEGRAM_ADMIN_CHAT_ID.'
+            ? 'CONFIGURED & MATCHED'
+            : 'NOT MATCHED YET — Copy the Actual Numeric Chat ID above into Vercel as TELEGRAM_ADMIN_CHAT_ID'
         }`,
       ].join('\n');
 
-      await sendTelegramMessage(chatId, setupReply);
+      const sentMsg = await sendTelegramMessage(chatId, setupReply);
+      logger.info('AdminGroupDiagnostic', 'Completed /test_group diagnostic reply', {
+        updateReceived: true,
+        updateType: update.edited_message ? 'edited_message' : 'message',
+        testGroupDetected: true,
+        replySucceeded: Boolean(sentMsg && sentMsg.delivered),
+      });
+      return null;
+    }
+
+    if (isTestGroupCmd) {
+      const sentMsg = await sendTelegramMessage(
+        chatId,
+        'ℹ️ /test_group command केवल आपके Private Telegram Admin Group के अंदर काम करता है जहाँ @DiwaliDhamaka2026Bot Administrator है। कृपया इसे अपने Admin Group में भेजें।'
+      );
+      logger.info('AdminGroupDiagnostic', 'Informed user to run /test_group inside a group chat', {
+        updateReceived: true,
+        updateType: 'message',
+        testGroupDetected: true,
+        replySucceeded: Boolean(sentMsg && sentMsg.delivered),
+      });
       return null;
     }
 
@@ -2684,7 +2735,16 @@ module.exports = async function handler(req, res) {
         endpoint: '/api/telegram/webhook',
         status: 'READY',
         supported_methods: ['POST', 'GET'],
-        supported_commands: ['/start', '/enter', '/ticket', '/prizes', '/refer', '/terms', '/support'],
+        supported_commands: [
+          '/start',
+          '/enter',
+          '/ticket',
+          '/prizes',
+          '/refer',
+          '/terms',
+          '/support',
+          '/test_group',
+        ],
         supported_updates: ['message', 'callback_query', 'pre_checkout_query'],
         payment_mode: 'telegram_stars (XTR)',
         currency: 'XTR',

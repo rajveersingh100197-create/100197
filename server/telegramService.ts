@@ -584,6 +584,7 @@ export async function ensureTelegramWebhookRegistered(forceSync = false) {
           { command: 'refer', description: '🎁 Refer & Earn Dashboard' },
           { command: 'terms', description: 'नियम और शर्तें | Terms & Conditions' },
           { command: 'support', description: 'सहायता | Customer Support' },
+          { command: 'test_group', description: 'Admin Group Chat ID Diagnostic' },
         ],
       }),
     }).catch(() => {});
@@ -616,10 +617,11 @@ export async function sendTelegramMessage(
   chatId: string | number,
   text: string,
   replyMarkup?: InlineKeyboardMarkup | ReplyKeyboardMarkup
-): Promise<OutgoingBotMessage> {
+): Promise<OutgoingBotMessage & { delivered?: boolean }> {
   const cid = String(chatId);
+  let delivered = false;
 
-  const outgoingRecord: OutgoingBotMessage = {
+  const outgoingRecord: OutgoingBotMessage & { delivered?: boolean } = {
     id: crypto.randomUUID(),
     chat_id: cid,
     text,
@@ -658,6 +660,7 @@ export async function sendTelegramMessage(
           description: errBody.slice(0, 200),
         });
       } else {
+        delivered = true;
         logger.info('TelegramAPI', 'Delivered outgoing Telegram reply message');
       }
     } catch (err) {
@@ -666,12 +669,14 @@ export async function sendTelegramMessage(
       });
     }
   } else {
+    delivered = true;
     logger.info('TelegramBot', 'Prepared bot reply message', {
       preview: text.split('\n')[0],
       hasButtons: Boolean(replyMarkup),
     });
   }
 
+  outgoingRecord.delivered = delivered;
   return outgoingRecord;
 }
 
@@ -846,18 +851,32 @@ export async function answerTelegramCallbackQuery(
  */
 export async function verifyTelegramGroupAdmin(
   chatId: string | number,
-  userId: string | number
+  userId?: string | number | null,
+  senderChatId?: string | number | null
 ): Promise<boolean> {
   const cid = String(chatId);
-  const uid = String(userId);
+  const uid = userId !== undefined && userId !== null ? String(userId) : '';
+  const scid = senderChatId !== undefined && senderChatId !== null ? String(senderChatId) : '';
+
   if (!/^-\d+$/.test(cid)) {
     return false;
   }
 
+  // Anonymous Group Admin: Telegram sets sender_chat.id === chat.id or from.id === 1087968824 (@GroupAnonymousBot)
+  if (scid && scid === cid) {
+    return true;
+  }
+  if (uid === '1087968824' || uid === cid) {
+    return true;
+  }
+
   const token = CONFIG.TELEGRAM_BOT_TOKEN;
   if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN' || cid.startsWith('sim_')) {
-    // Allow simulator/local testing with negative group IDs
     return true;
+  }
+
+  if (!uid || !/^\d+$/.test(uid)) {
+    return false;
   }
 
   try {
@@ -867,7 +886,7 @@ export async function verifyTelegramGroupAdmin(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: cid,
-        user_id: Number(uid) || uid,
+        user_id: Number(uid),
       }),
     });
     if (!response.ok) {
